@@ -171,9 +171,9 @@ Never commit `.env.local`. A `.env.local.example` file with placeholder values m
 
 ## Cron Schedule (Vercel)
 
-- **Ingestion:** Every 2 hours between 5am–10pm NZST (adjust UTC offset for current daylight saving).
-- **Digest:** Once daily at 6:30am NZST.
-- Both routes must validate `CRON_SECRET` and return 401 if it doesn't match.
+- **PoC:** `vercel.json` does not define scheduled crons — Vercel scheduled functions require **Vercel Pro**. Ingest and digest are triggered manually from the admin dashboard (`/`) instead.
+- **Future (Pro):** Ingestion could run every 2 hours between 5am–10pm NZST; digest once daily around 6:30am NZST (adjust UTC for daylight saving).
+- Both `/api/ingest` and `/api/digest` must validate `CRON_SECRET` and return 401 if it doesn't match.
 
 ---
 
