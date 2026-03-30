@@ -97,11 +97,11 @@ All sources use RSS feeds. No HTML scraping for the PoC unless a feed doesn't pr
 
 | Source | RSS Feed | Content Available | Notes |
 |--------|----------|-------------------|-------|
-| Stuff | stuff.co.nz/rss | Full text (content:encoded) | Primary open source |
-| RNZ | rnz.co.nz/rss | Full text (content:encoded) | Reliable, well-structured |
-| Scoop | scoop.co.nz/rss | Full text | Press releases and news |
-| Newstalk ZB | newstalkzb.co.nz/rss | Near-full text | Articles, not audio transcripts |
-| NZ Herald | nzherald.co.nz/rss | **Title + summary only** | Paywalled. Flag with `paywalled: true` |
+| Stuff | `https://www.stuff.co.nz/rss` | Summary / full text when the feed includes it | Atom feed; often summary-only in practice |
+| RNZ | `https://www.rnz.co.nz/rss/national.xml` | Description / encoded content when present | The bare `rnz.co.nz/rss` path is an HTML index, not XML — PoC uses the national headlines XML feed |
+| Scoop | `https://www.scoop.co.nz/rss` | Full text | Press releases and news. **May need a different feed URL or User-Agent** to work reliably — some environments return WAF challenges or non-XML responses |
+| Newstalk ZB | `https://www.newstalkzb.co.nz/rss` | Near-full text | Articles, not audio transcripts |
+| NZ Herald | `https://www.nzherald.co.nz/arc/outboundfeeds/rss/section/nz/?outputType=xml&_website=nzh` | **Title + summary only** | Paywalled. Flag with `paywalled: true`. The bare `nzherald.co.nz/rss` path is an HTML listing — PoC uses NZ Herald’s Arc outbound RSS (NZ section) |
 
 **Important:** RSS feed URLs may need verification at build time. If a URL returns a 404 or empty feed, check the source website for the current feed location before asking for help.
 

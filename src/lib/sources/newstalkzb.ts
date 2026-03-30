@@ -1,8 +1,19 @@
-/**
- * TODO: Newstalk ZB RSS ingestion.
- * - Feed: newstalkzb.co.nz RSS (verify URL).
- * - Articles (not audio transcripts); near-full text expected.
- * - Map to `Article` with `source: "newstalkzb"`.
- */
+import type { Article } from "@/lib/types";
+import {
+  createRssParser,
+  fetchFeedItems,
+  rssItemToArticle,
+} from "@/lib/sources/shared";
 
-export {};
+export const NEWSTALKZB_FEED_URL = "https://www.newstalkzb.co.nz/rss";
+
+export async function fetchNewstalkzbArticles(): Promise<Article[]> {
+  const parser = createRssParser();
+  const items = await fetchFeedItems(parser, NEWSTALKZB_FEED_URL);
+  const out: Article[] = [];
+  for (const item of items) {
+    const article = rssItemToArticle(item, "newstalkzb", false);
+    if (article) out.push(article);
+  }
+  return out;
+}

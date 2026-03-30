@@ -1,9 +1,20 @@
-/**
- * TODO: Stuff.co.nz RSS ingestion.
- * - Feed: stuff.co.nz RSS (verify URL at build/runtime per `project.md`).
- * - Prefer full text from `content:encoded` when present.
- * - Map items to `Article` with `source: "stuff"` and `paywalled: false`.
- * - Export a function such as `fetchStuffArticles(): Promise<Article[]>` for the ingest route to call.
- */
+import type { Article } from "@/lib/types";
+import {
+  createRssParser,
+  fetchFeedItems,
+  rssItemToArticle,
+} from "@/lib/sources/shared";
 
-export {};
+/** Stuff national Atom/RSS feed (full text when the feed includes it; often summary-only in Atom). */
+export const STUFF_FEED_URL = "https://www.stuff.co.nz/rss";
+
+export async function fetchStuffArticles(): Promise<Article[]> {
+  const parser = createRssParser();
+  const items = await fetchFeedItems(parser, STUFF_FEED_URL);
+  const out: Article[] = [];
+  for (const item of items) {
+    const article = rssItemToArticle(item, "stuff", false);
+    if (article) out.push(article);
+  }
+  return out;
+}
