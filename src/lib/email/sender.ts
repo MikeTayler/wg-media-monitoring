@@ -8,13 +8,18 @@ export type SendDigestResult = {
   error?: string;
 };
 
+/** US API (default). EU accounts need `MAILGUN_API_URL=https://api.eu.mailgun.net`. */
+const MAILGUN_API_URL_US = "https://api.mailgun.net";
+
 function getMailgunClient() {
   const key = process.env.MAILGUN_API_KEY;
   if (!key) {
     throw new Error("MAILGUN_API_KEY is not set");
   }
+  const url =
+    process.env.MAILGUN_API_URL?.trim() || MAILGUN_API_URL_US;
   const mailgun = new Mailgun(FormData);
-  return mailgun.client({ username: "api", key });
+  return mailgun.client({ username: "api", key, url });
 }
 
 /**
