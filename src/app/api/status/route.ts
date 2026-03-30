@@ -1,21 +1,43 @@
 import { NextResponse } from "next/server";
+import {
+  filterErrorsLast24h,
+  readPipelineStatus,
+} from "@/lib/status/store";
+
+export const dynamic = "force-dynamic";
 
 /**
- * TODO: System health and last-run info (see `project.md`).
- * - Read last successful ingestion and digest timestamps from PoC storage (JSON / in-memory).
- * - Surface recent pipeline errors (ingest per-source failures, OpenRouter/Mailgun errors) with timestamps.
- * - Optionally validate `CRON_SECRET` if this route is only for operators/cron; or leave public read-only for the status page.
+ * Public PoC status — no auth (`project.md`).
+ * Reads `/tmp/wg-pipeline-status.json` (written by ingest/digest on each run).
  */
-
 export async function GET() {
-  return NextResponse.json(
-    {
-      ok: false,
-      message: "Status not implemented yet.",
-      lastIngestionAt: null,
-      lastDigestAt: null,
-      recentErrors: [],
-    },
-    { status: 501 }
-  );
+  try {
+    const raw = await readPipelineStatus();
+    const errors = filterErrorsLast24h(raw.errors);
+
+    return NextResponse.json({
+      ok: true,
+      lastIngestionAt: raw.lastIngestion?.at ?? null,
+      articleCount: raw.lastIngestion?.articleCount ?? null,
+      lastDigestAt: raw.lastDigest?.at ?? null,
+      digestRecipientCount: raw.lastDigest?.recipientCount ?? null,
+      digestEmailsSent: raw.lastDigest?.emailsSent ?? null,
+      recentErrors: errors,
+    });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    return NextResponse.json(
+      {
+        ok: false,
+        error: message,
+        lastIngestionAt: null,
+        articleCount: null,
+        lastDigestAt: null,
+        digestRecipientCount: null,
+        digestEmailsSent: null,
+        recentErrors: [],
+      },
+      { status: 500 }
+    );
+  }
 }

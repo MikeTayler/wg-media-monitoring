@@ -1,21 +1,13 @@
 import { NextResponse } from "next/server";
+import { authorizeCron } from "@/lib/api/cron-auth";
 import { ingestAll } from "@/lib/ingest/all";
+import { recordIngestSuccess, recordPipelineError } from "@/lib/status/store";
 
 export const dynamic = "force-dynamic";
 
-function authorizeCron(request: Request): boolean {
-  const secret = process.env.CRON_SECRET;
-  if (!secret) return false;
-  const url = new URL(request.url);
-  const q = url.searchParams.get("secret");
-  const auth = request.headers.get("authorization");
-  const bearer = auth?.match(/^Bearer\s+(.+)$/i)?.[1] ?? null;
-  return q === secret || bearer === secret;
-}
-
 /**
- * RSS ingestion entrypoint (Vercel Cron or manual call with `?secret=` or `Authorization: Bearer`).
- * Orchestrates `ingestAll()` in `@/lib/ingest/all`.
+ * RSS ingestion entrypoint (Vercel Cron or manual call).
+ * Auth: `Authorization: Bearer`, `x-cron-secret`, or `?secret=` — see `@/lib/api/cron-auth`.
  */
 export async function GET(request: Request) {
   if (!authorizeCron(request)) {
@@ -27,10 +19,20 @@ export async function GET(request: Request) {
 
   try {
     const result = await ingestAll();
+    try {
+      await recordIngestSuccess(result.totalUnique, result.errors ?? {});
+    } catch (persistErr) {
+      console.error("[ingest] Failed to persist status:", persistErr);
+    }
     return NextResponse.json(result);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     console.error("[ingest] ingestAll failed:", message);
+    try {
+      await recordPipelineError("ingest", message);
+    } catch {
+      /* ignore */
+    }
     return NextResponse.json({ ok: false, error: message }, { status: 500 });
   }
 }

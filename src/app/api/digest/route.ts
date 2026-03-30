@@ -1,18 +1,81 @@
 import { NextResponse } from "next/server";
+import { authorizeCron } from "@/lib/api/cron-auth";
+import { runDigestPipeline } from "@/lib/digest/pipeline";
+import { recordDigestRun, recordPipelineError } from "@/lib/status/store";
+
+export const dynamic = "force-dynamic";
 
 /**
- * TODO: Daily email digest (triggered by Vercel Cron or manual call).
- * - Validate `CRON_SECRET` like `/api/ingest`; return 401 if invalid.
- * - Support `?dry_run=true` to return rendered HTML without sending via Mailgun.
- * - Load matched/scored articles from storage; group by entity and recipient per project.md email rules.
- * - Use `@/lib/email/template` for HTML and `@/lib/email/sender` for Mailgun.
- * - Send one email per recipient; handle empty days with a short “no coverage” message.
- * - Record last digest send time for the status page.
+ * Daily digest: keyword match → AI score → summaries → Mailgun.
+ * Auth: `Authorization: Bearer`, `x-cron-secret`, or `?secret=` — see `@/lib/api/cron-auth`.
+ * `?dry_run=true` — preview JSON only; does not send email or update last-digest status.
  */
+export async function GET(request: Request) {
+  if (!authorizeCron(request)) {
+    return NextResponse.json(
+      { ok: false, error: "Unauthorized" },
+      { status: 401 }
+    );
+  }
 
-export async function GET() {
-  return NextResponse.json(
-    { ok: false, message: "Digest not implemented yet." },
-    { status: 501 }
-  );
+  const url = new URL(request.url);
+  const dryRun = url.searchParams.get("dry_run") === "true";
+
+  try {
+    const result = await runDigestPipeline({ dryRun });
+
+    if (!result.ok) {
+      try {
+        await recordPipelineError("digest", result.error ?? "Digest failed");
+      } catch {
+        /* ignore */
+      }
+      return NextResponse.json(
+        {
+          ok: false,
+          error: result.error ?? "Digest failed",
+          stats: result.stats,
+        },
+        { status: 500 }
+      );
+    }
+
+    const { stats } = result;
+
+    if (!dryRun) {
+      try {
+        await recordDigestRun({
+          recipientCount: stats.recipientsTargeted,
+          emailsSent: stats.emailsSent,
+        });
+      } catch (persistErr) {
+        console.error("[digest] Failed to persist status:", persistErr);
+      }
+    }
+
+    if (dryRun) {
+      return NextResponse.json({
+        ok: true,
+        dryRun: true,
+        previewRecipient: result.previewRecipient,
+        previewHtml: result.previewHtml,
+        stats,
+      });
+    }
+
+    return NextResponse.json({
+      ok: true,
+      dryRun: false,
+      stats,
+    });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error("[digest] Unhandled error:", message);
+    try {
+      await recordPipelineError("digest", message);
+    } catch {
+      /* ignore */
+    }
+    return NextResponse.json({ ok: false, error: message }, { status: 500 });
+  }
 }

@@ -1,8 +1,4 @@
-/**
- * TODO: Shared domain types for the PoC pipeline.
- * - Keep in sync with `project.md` and `/lib/config.ts` as behaviour is implemented.
- * - Add `KeywordRule` (or refine) once keyword matching rules are encoded beyond simple string lists.
- */
+/** Shared domain types for the PoC pipeline — keep in sync with `project.md` and `/lib/config.ts`. */
 
 /** Normalised article after RSS (and optional HTML) fetch. */
 export interface Article {
@@ -25,10 +21,7 @@ export interface Entity {
   recipients: string[];
 }
 
-/**
- * TODO: Define how keyword rules are represented (e.g. per-entity matchers, global rules).
- * Wire into `keywords.ts` when implementing matching.
- */
+/** Optional future shape for richer rules — PoC uses `Entity.keywords` + `Entity.aliases` only. */
 export interface KeywordRule {
   entityId: string;
   terms: string[];
