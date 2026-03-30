@@ -9,6 +9,7 @@ export const dynamic = "force-dynamic";
  * Daily digest: keyword match → AI score → summaries → Mailgun.
  * Auth: `Authorization: Bearer`, `x-cron-secret`, or `?secret=` — see `@/lib/api/cron-auth`.
  * `?dry_run=true` — preview JSON only; does not send email or update last-digest status.
+ * `?solo_test=true` — send/preview only to `DIGEST_SOLO_TEST_EMAIL` (full digest content).
  */
 export async function GET(request: Request) {
   if (!authorizeCron(request)) {
@@ -20,9 +21,10 @@ export async function GET(request: Request) {
 
   const url = new URL(request.url);
   const dryRun = url.searchParams.get("dry_run") === "true";
+  const soloTest = url.searchParams.get("solo_test") === "true";
 
   try {
-    const result = await runDigestPipeline({ dryRun });
+    const result = await runDigestPipeline({ dryRun, soloTest });
 
     if (!result.ok) {
       try {
@@ -57,6 +59,7 @@ export async function GET(request: Request) {
       return NextResponse.json({
         ok: true,
         dryRun: true,
+        soloTest: result.soloTest ?? false,
         previewRecipient: result.previewRecipient,
         previewHtml: result.previewHtml,
         stats,
@@ -66,6 +69,7 @@ export async function GET(request: Request) {
     return NextResponse.json({
       ok: true,
       dryRun: false,
+      soloTest: result.soloTest ?? false,
       stats,
     });
   } catch (err) {

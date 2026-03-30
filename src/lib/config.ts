@@ -89,3 +89,6 @@ export const entities: Entity[] = [
     ],
   },
 ];
+
+/** Solo-test digest: dashboard sends only to this address (full digest content). */
+export const DIGEST_SOLO_TEST_EMAIL = "michael.tayler@wisemanagement.co.nz";

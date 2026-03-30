@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { DIGEST_SOLO_TEST_EMAIL } from "@/lib/config";
 import { getDigestRecipientEmails } from "@/lib/digest/pipeline";
 import {
   filterErrorsLast24h,
@@ -25,6 +26,7 @@ export async function GET() {
       digestRecipientCount: raw.lastDigest?.recipientCount ?? null,
       digestEmailsSent: raw.lastDigest?.emailsSent ?? null,
       configuredRecipientCount,
+      soloTestRecipientEmail: DIGEST_SOLO_TEST_EMAIL,
       recentErrors: errors,
     });
   } catch (err) {
@@ -39,6 +41,7 @@ export async function GET() {
         digestRecipientCount: null,
         digestEmailsSent: null,
         configuredRecipientCount: null,
+        soloTestRecipientEmail: null,
         recentErrors: [],
       },
       { status: 500 }

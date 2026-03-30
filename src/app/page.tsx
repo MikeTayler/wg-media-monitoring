@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useState, type CSSProperties } from "react";
 
 const CRON_SECRET_SESSION_KEY = "wg-media-monitor-cron-secret";
+const SOLO_TEST_SESSION_KEY = "wg-media-monitor-solo-test";
 
 type StatusPayload = {
   ok: boolean;
@@ -12,6 +13,7 @@ type StatusPayload = {
   digestRecipientCount: number | null;
   digestEmailsSent: number | null;
   configuredRecipientCount: number | null;
+  soloTestRecipientEmail: string | null;
   recentErrors: Array<{ at: string; source: string; message: string }>;
   error?: string;
 };
@@ -27,6 +29,7 @@ type IngestPayload = {
 type DigestPayload = {
   ok?: boolean;
   dryRun?: boolean;
+  soloTest?: boolean;
   previewHtml?: string;
   previewRecipient?: string;
   stats?: {
@@ -75,10 +78,14 @@ export default function AdminDashboardPage() {
   const [sendLoading, setSendLoading] = useState(false);
   const [sendResult, setSendResult] = useState<DigestPayload | null>(null);
 
+  const [soloTestOnly, setSoloTestOnly] = useState(false);
+
   useEffect(() => {
     try {
       const saved = sessionStorage.getItem(CRON_SECRET_SESSION_KEY);
       if (saved) setCronSecret(saved);
+      const solo = sessionStorage.getItem(SOLO_TEST_SESSION_KEY);
+      if (solo === "1") setSoloTestOnly(true);
     } catch {
       /* sessionStorage unavailable */
     }
@@ -88,6 +95,16 @@ export default function AdminDashboardPage() {
     setCronSecret(value);
     try {
       sessionStorage.setItem(CRON_SECRET_SESSION_KEY, value);
+    } catch {
+      /* ignore */
+    }
+  }, []);
+
+  const persistSoloTest = useCallback((checked: boolean) => {
+    setSoloTestOnly(checked);
+    try {
+      if (checked) sessionStorage.setItem(SOLO_TEST_SESSION_KEY, "1");
+      else sessionStorage.removeItem(SOLO_TEST_SESSION_KEY);
     } catch {
       /* ignore */
     }
@@ -153,6 +170,7 @@ export default function AdminDashboardPage() {
         secret: cronSecret.trim(),
         dry_run: "true",
       });
+      if (soloTestOnly) q.set("solo_test", "true");
       const res = await fetch(`/api/digest?${q}`, { method: "GET" });
       const data = (await res.json()) as DigestPayload;
       if (!res.ok || !data.ok) {
@@ -173,16 +191,22 @@ export default function AdminDashboardPage() {
       setSendResult({ error: "Enter CRON_SECRET first." });
       return;
     }
+    const soloEmail = status?.soloTestRecipientEmail;
     const n = status?.configuredRecipientCount ?? 0;
-    const ok = window.confirm(
-      `Send digest to ${n} recipient${n === 1 ? "" : "s"}?`
-    );
+    const ok = soloTestOnly
+      ? window.confirm(
+          `Send test digest only to ${soloEmail ?? "the solo-test address"}?`
+        )
+      : window.confirm(
+          `Send digest to ${n} recipient${n === 1 ? "" : "s"}?`
+        );
     if (!ok) return;
 
     setSendLoading(true);
     setSendResult(null);
     try {
       const q = new URLSearchParams({ secret: cronSecret.trim() });
+      if (soloTestOnly) q.set("solo_test", "true");
       const res = await fetch(`/api/digest?${q}`, { method: "GET" });
       const data = (await res.json()) as DigestPayload;
       setSendResult(data);
@@ -396,6 +420,41 @@ export default function AdminDashboardPage() {
 
       <section style={panelStyle}>
         <h2 style={{ fontSize: "1rem", margin: "0 0 0.75rem 0" }}>Digest</h2>
+        <label
+          style={{
+            display: "flex",
+            alignItems: "flex-start",
+            gap: 10,
+            marginBottom: 14,
+            fontSize: 14,
+            cursor: "pointer",
+            maxWidth: "36rem",
+          }}
+        >
+          <input
+            type="checkbox"
+            checked={soloTestOnly}
+            onChange={(e) => persistSoloTest(e.target.checked)}
+            style={{ marginTop: 3, flexShrink: 0 }}
+          />
+          <span>
+            Send digest only to me (testing)
+            {status?.soloTestRecipientEmail ? (
+              <>
+                :{" "}
+                <span
+                  style={{ fontFamily: "ui-monospace, monospace", fontSize: 13 }}
+                >
+                  {status.soloTestRecipientEmail}
+                </span>
+              </>
+            ) : null}
+            <span style={{ display: "block", color: "var(--muted)", fontSize: 12, marginTop: 4 }}>
+              Uses the full digest (all entity sections). Uncheck to send to all configured
+              recipients.
+            </span>
+          </span>
+        </label>
         <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginBottom: 12 }}>
           <button
             type="button"

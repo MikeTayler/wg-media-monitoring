@@ -1,5 +1,5 @@
 import { readFile } from "fs/promises";
-import { entities } from "@/lib/config";
+import { DIGEST_SOLO_TEST_EMAIL, entities } from "@/lib/config";
 import {
   RELEVANCE_DISCARD_BELOW,
   scoreArticleRelevance,
@@ -185,6 +185,7 @@ export type DigestRunResult = {
   ok: boolean;
   stats: DigestRunStats;
   dryRun: boolean;
+  soloTest?: boolean;
   previewHtml?: string;
   previewRecipient?: string;
   error?: string;
@@ -192,6 +193,8 @@ export type DigestRunResult = {
 
 export async function runDigestPipeline(options: {
   dryRun: boolean;
+  /** One email to `DIGEST_SOLO_TEST_EMAIL` with full digest (all scored entries). */
+  soloTest?: boolean;
 }): Promise<DigestRunResult> {
   let articles: Article[];
   try {
@@ -201,6 +204,7 @@ export async function runDigestPipeline(options: {
     return {
       ok: false,
       dryRun: options.dryRun,
+      soloTest: options.soloTest === true,
       error: `Could not load articles: ${message}`,
       stats: {
         articlesProcessed: 0,
@@ -219,7 +223,10 @@ export async function runDigestPipeline(options: {
 
   const digestEntriesAfterScoring = scoredEntries.length;
 
-  const recipients = getDigestRecipientEmails();
+  const soloTest = options.soloTest === true;
+  const recipients = soloTest
+    ? [DIGEST_SOLO_TEST_EMAIL]
+    : getDigestRecipientEmails();
   const recipientsTargeted = recipients.length;
 
   if (recipients.length === 0) {
@@ -227,6 +234,7 @@ export async function runDigestPipeline(options: {
     return {
       ok: true,
       dryRun: options.dryRun,
+      soloTest,
       stats: {
         articlesProcessed,
         keywordMatchPairs,
@@ -241,17 +249,20 @@ export async function runDigestPipeline(options: {
 
   if (options.dryRun) {
     const previewRecipient = recipients[0];
-    const filtered = filterEntriesForRecipient(previewRecipient, scoredEntries);
+    const filtered = soloTest
+      ? scoredEntries
+      : filterEntriesForRecipient(previewRecipient, scoredEntries);
     const sections = buildSectionsForRecipient(filtered);
     const previewHtml = renderDigestHtml(sections);
 
     console.log(
-      `[digest] dry_run: articles=${articlesProcessed}, keywordPairs=${keywordMatchPairs}, scoredEntries=${digestEntriesAfterScoring}, previewRecipient=${previewRecipient}`
+      `[digest] dry_run${soloTest ? " solo_test" : ""}: articles=${articlesProcessed}, keywordPairs=${keywordMatchPairs}, scoredEntries=${digestEntriesAfterScoring}, previewRecipient=${previewRecipient}`
     );
 
     return {
       ok: true,
       dryRun: true,
+      soloTest,
       previewHtml,
       previewRecipient,
       stats: {
@@ -266,7 +277,9 @@ export async function runDigestPipeline(options: {
 
   let emailsSent = 0;
   for (const email of recipients) {
-    const filtered = filterEntriesForRecipient(email, scoredEntries);
+    const filtered = soloTest
+      ? scoredEntries
+      : filterEntriesForRecipient(email, scoredEntries);
     const sections = buildSectionsForRecipient(filtered);
     const html = renderDigestHtml(sections);
 
@@ -275,12 +288,13 @@ export async function runDigestPipeline(options: {
   }
 
   console.log(
-    `[digest] Sent: articles=${articlesProcessed}, keywordPairs=${keywordMatchPairs}, scoredEntries=${digestEntriesAfterScoring}, emailsSent=${emailsSent}/${recipients.length}`
+    `[digest] Sent${soloTest ? " solo_test" : ""}: articles=${articlesProcessed}, keywordPairs=${keywordMatchPairs}, scoredEntries=${digestEntriesAfterScoring}, emailsSent=${emailsSent}/${recipients.length}`
   );
 
   return {
     ok: true,
     dryRun: false,
+    soloTest,
     stats: {
       articlesProcessed,
       keywordMatchPairs,
