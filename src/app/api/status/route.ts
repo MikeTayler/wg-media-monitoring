@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { getDigestRecipientEmails } from "@/lib/digest/pipeline";
 import {
   filterErrorsLast24h,
   readPipelineStatus,
@@ -14,6 +15,7 @@ export async function GET() {
   try {
     const raw = await readPipelineStatus();
     const errors = filterErrorsLast24h(raw.errors);
+    const configuredRecipientCount = getDigestRecipientEmails().length;
 
     return NextResponse.json({
       ok: true,
@@ -22,6 +24,7 @@ export async function GET() {
       lastDigestAt: raw.lastDigest?.at ?? null,
       digestRecipientCount: raw.lastDigest?.recipientCount ?? null,
       digestEmailsSent: raw.lastDigest?.emailsSent ?? null,
+      configuredRecipientCount,
       recentErrors: errors,
     });
   } catch (err) {
@@ -35,6 +38,7 @@ export async function GET() {
         lastDigestAt: null,
         digestRecipientCount: null,
         digestEmailsSent: null,
+        configuredRecipientCount: null,
         recentErrors: [],
       },
       { status: 500 }
