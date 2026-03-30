@@ -87,6 +87,21 @@ export function filterEntriesForRecipient(
   );
 }
 
+/**
+ * Solo-test recipient is not on entity recipient lists; do not apply subscription filtering.
+ * Preview and send must use the same entry set (all scored rows across entities).
+ */
+function digestEntriesForEmail(
+  soloTest: boolean,
+  recipientEmail: string,
+  scoredEntries: ScoredDigestEntry[]
+): ScoredDigestEntry[] {
+  if (soloTest) {
+    return scoredEntries;
+  }
+  return filterEntriesForRecipient(recipientEmail, scoredEntries);
+}
+
 export function buildSectionsForRecipient(
   entries: ScoredDigestEntry[]
 ): DigestSection[] {
@@ -249,9 +264,11 @@ export async function runDigestPipeline(options: {
 
   if (options.dryRun) {
     const previewRecipient = recipients[0];
-    const filtered = soloTest
-      ? scoredEntries
-      : filterEntriesForRecipient(previewRecipient, scoredEntries);
+    const filtered = digestEntriesForEmail(
+      soloTest,
+      previewRecipient,
+      scoredEntries
+    );
     const sections = buildSectionsForRecipient(filtered);
     const previewHtml = renderDigestHtml(sections);
 
@@ -276,15 +293,26 @@ export async function runDigestPipeline(options: {
   }
 
   let emailsSent = 0;
-  for (const email of recipients) {
-    const filtered = soloTest
-      ? scoredEntries
-      : filterEntriesForRecipient(email, scoredEntries);
+
+  if (soloTest) {
+    const filtered = digestEntriesForEmail(true, recipients[0], scoredEntries);
     const sections = buildSectionsForRecipient(filtered);
     const html = renderDigestHtml(sections);
+    const result = await sendDigestEmail({
+      to: recipients[0],
+      subject,
+      html,
+    });
+    if (result.ok) emailsSent = 1;
+  } else {
+    for (const email of recipients) {
+      const filtered = digestEntriesForEmail(false, email, scoredEntries);
+      const sections = buildSectionsForRecipient(filtered);
+      const html = renderDigestHtml(sections);
 
-    const result = await sendDigestEmail({ to: email, subject, html });
-    if (result.ok) emailsSent++;
+      const result = await sendDigestEmail({ to: email, subject, html });
+      if (result.ok) emailsSent++;
+    }
   }
 
   console.log(
