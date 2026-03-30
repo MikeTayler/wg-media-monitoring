@@ -1,16 +1,20 @@
 /**
  * Hardcoded PoC configuration (entities, aliases, keywords, recipients).
  * Replace or extend entries with confirmed participant input — see `project.md`.
- * No admin UI; edit and redeploy for PoC changes.
+ * Keyword overrides for testing: `/tmp/keyword-overrides.json` merged in {@link getEntities}.
  */
 
+import { existsSync, readFileSync, statSync } from "fs";
 import type { Entity } from "@/lib/types";
+
+/** JSON map: entity id → keywords array (replaces base keywords for that id). */
+export const KEYWORD_OVERRIDES_PATH = "/tmp/keyword-overrides.json";
 
 /**
  * `global` has sector-wide terms; `recipients` is empty — digest delivery should
  * treat this bucket as “all participants” (wired in the digest step).
  */
-export const entities: Entity[] = [
+export const baseEntities: Entity[] = [
   {
     id: "leva",
     name: "Le Va",
@@ -92,3 +96,75 @@ export const entities: Entity[] = [
 
 /** Solo-test digest: dashboard sends only to this address (full digest content). */
 export const DIGEST_SOLO_TEST_EMAIL = "michael.tayler@wisemanagement.co.nz";
+
+type EntityCache = { mtime: number; list: Entity[] };
+
+let entityCache: EntityCache | null = null;
+
+function cloneEntity(e: Entity): Entity {
+  return {
+    ...e,
+    aliases: [...e.aliases],
+    keywords: [...e.keywords],
+    recipients: [...e.recipients],
+  };
+}
+
+function getOverrideFileMtime(): number {
+  try {
+    return statSync(KEYWORD_OVERRIDES_PATH).mtimeMs;
+  } catch {
+    return -1;
+  }
+}
+
+export function loadKeywordOverridesFromDisk(): Record<string, string[]> {
+  try {
+    const raw = readFileSync(KEYWORD_OVERRIDES_PATH, "utf8");
+    const data = JSON.parse(raw) as unknown;
+    if (!data || typeof data !== "object" || Array.isArray(data)) return {};
+    const out: Record<string, string[]> = {};
+    for (const [k, v] of Object.entries(data as Record<string, unknown>)) {
+      if (Array.isArray(v) && v.every((x) => typeof x === "string")) {
+        out[k] = v;
+      }
+    }
+    return out;
+  } catch {
+    return {};
+  }
+}
+
+/** Returns entity ids that have an entry in the override file (even if empty array). */
+export function getKeywordOverrideEntityIds(): Set<string> {
+  return new Set(Object.keys(loadKeywordOverridesFromDisk()));
+}
+
+/**
+ * Base config merged with `/tmp/keyword-overrides.json` (per-entity keyword replacement).
+ * Cached until the override file’s mtime changes.
+ */
+export function getEntities(): Entity[] {
+  const mtime = getOverrideFileMtime();
+  if (entityCache && entityCache.mtime === mtime) {
+    return entityCache.list;
+  }
+  const overrides = loadKeywordOverridesFromDisk();
+  const merged = baseEntities.map((e) => {
+    if (e.id in overrides) {
+      return { ...cloneEntity(e), keywords: [...overrides[e.id]] };
+    }
+    return cloneEntity(e);
+  });
+  entityCache = { mtime, list: merged };
+  return merged;
+}
+
+/** Call after writing `keyword-overrides.json` so the next `getEntities()` sees updates. */
+export function invalidateKeywordEntitiesCache(): void {
+  entityCache = null;
+}
+
+export function getBaseEntityById(id: string): Entity | undefined {
+  return baseEntities.find((e) => e.id === id);
+}

@@ -1,4 +1,4 @@
-import { entities } from "@/lib/config";
+import { getEntities } from "@/lib/config";
 import type { Article, Entity } from "@/lib/types";
 
 /** One entity that matched the article, with the phrases that triggered it. */
@@ -44,7 +44,7 @@ export function matchArticleToEntities(article: Article): EntityKeywordMatch[] {
   const haystack = buildHaystack(article);
   const out: EntityKeywordMatch[] = [];
 
-  for (const entity of entities) {
+  for (const entity of getEntities()) {
     const matchedKeywords = matchedTermsForEntity(haystack, entity);
     if (matchedKeywords.length === 0) continue;
     out.push({

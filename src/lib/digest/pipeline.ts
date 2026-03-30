@@ -1,5 +1,5 @@
 import { readFile } from "fs/promises";
-import { DIGEST_SOLO_TEST_EMAIL, entities } from "@/lib/config";
+import { DIGEST_SOLO_TEST_EMAIL, getEntities } from "@/lib/config";
 import {
   RELEVANCE_DISCARD_BELOW,
   scoreArticleRelevance,
@@ -54,13 +54,13 @@ export async function loadArticlesFromStore(): Promise<Article[]> {
 }
 
 function entityById(id: string) {
-  return entities.find((e) => e.id === id);
+  return getEntities().find((e) => e.id === id);
 }
 
 /** All distinct recipient emails that appear on at least one non-global entity. */
 export function getDigestRecipientEmails(): string[] {
   const set = new Set<string>();
-  for (const e of entities) {
+  for (const e of getEntities()) {
     if (e.id === "global") continue;
     for (const r of e.recipients) set.add(r);
   }
@@ -97,7 +97,7 @@ export function buildSectionsForRecipient(
   }
 
   const sections: DigestSection[] = [];
-  for (const ent of entities) {
+  for (const ent of getEntities()) {
     const list = byEntity.get(ent.id);
     if (!list || list.length === 0) continue;
 

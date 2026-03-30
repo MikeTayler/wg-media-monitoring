@@ -42,6 +42,20 @@ type DigestPayload = {
   error?: string;
 };
 
+type KeywordEntityRow = {
+  id: string;
+  name: string;
+  aliases: string[];
+  keywords: string[];
+  hasKeywordOverride: boolean;
+};
+
+type KeywordsGetPayload = {
+  ok: boolean;
+  entities?: KeywordEntityRow[];
+  error?: string;
+};
+
 function Spinner() {
   return (
     <span
@@ -79,6 +93,14 @@ export default function AdminDashboardPage() {
   const [sendResult, setSendResult] = useState<DigestPayload | null>(null);
 
   const [soloTestOnly, setSoloTestOnly] = useState(false);
+
+  const [kwEntities, setKwEntities] = useState<KeywordEntityRow[] | null>(null);
+  const [kwDraft, setKwDraft] = useState<Record<string, string[]>>({});
+  const [kwNewInput, setKwNewInput] = useState<Record<string, string>>({});
+  const [kwExpanded, setKwExpanded] = useState<Record<string, boolean>>({});
+  const [kwLoading, setKwLoading] = useState(false);
+  const [kwError, setKwError] = useState<string | null>(null);
+  const [kwSavingId, setKwSavingId] = useState<string | null>(null);
 
   useEffect(() => {
     try {
@@ -131,6 +153,63 @@ export default function AdminDashboardPage() {
   useEffect(() => {
     loadStatus();
   }, [loadStatus]);
+
+  const loadKeywords = useCallback(async () => {
+    if (!cronSecret.trim()) {
+      setKwError("Enter CRON_SECRET first.");
+      return;
+    }
+    setKwLoading(true);
+    setKwError(null);
+    try {
+      const q = new URLSearchParams({ secret: cronSecret.trim() });
+      const res = await fetch(`/api/keywords?${q}`, { cache: "no-store" });
+      const data = (await res.json()) as KeywordsGetPayload;
+      if (!res.ok || !data.ok || !data.entities) {
+        setKwError(data.error ?? `HTTP ${res.status}`);
+        setKwEntities(null);
+        return;
+      }
+      setKwEntities(data.entities);
+      setKwDraft(
+        Object.fromEntries(data.entities.map((e) => [e.id, [...e.keywords]]))
+      );
+    } catch (e) {
+      setKwError(e instanceof Error ? e.message : String(e));
+      setKwEntities(null);
+    } finally {
+      setKwLoading(false);
+    }
+  }, [cronSecret]);
+
+  const saveEntityKeywords = async (entityId: string) => {
+    if (!cronSecret.trim()) {
+      setKwError("Enter CRON_SECRET first.");
+      return;
+    }
+    const keywords = kwDraft[entityId];
+    if (!keywords) return;
+    setKwSavingId(entityId);
+    setKwError(null);
+    try {
+      const q = new URLSearchParams({ secret: cronSecret.trim() });
+      const res = await fetch(`/api/keywords?${q}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ entityId, keywords }),
+      });
+      const data = (await res.json()) as { ok?: boolean; error?: string };
+      if (!res.ok || !data.ok) {
+        setKwError(data.error ?? `HTTP ${res.status}`);
+        return;
+      }
+      await loadKeywords();
+    } catch (e) {
+      setKwError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setKwSavingId(null);
+    }
+  };
 
   const runIngest = async () => {
     if (!cronSecret.trim()) {
@@ -379,6 +458,195 @@ export default function AdminDashboardPage() {
         >
           Refresh status
         </button>
+      </section>
+
+      <section style={panelStyle}>
+        <h2 style={{ fontSize: "1rem", margin: "0 0 0.75rem 0" }}>Keywords</h2>
+        <p style={{ color: "var(--muted)", fontSize: 13, margin: "0 0 10px", maxWidth: "40rem" }}>
+          Edit entity keywords for testing without redeploying. Overrides live in{" "}
+          <code style={{ fontSize: 12 }}>/tmp/keyword-overrides.json</code> and are lost on server
+          cold start — fine for PoC.
+        </p>
+        <div style={{ display: "flex", gap: 8, marginBottom: 12, flexWrap: "wrap" }}>
+          <button
+            type="button"
+            onClick={() => loadKeywords()}
+            disabled={kwLoading}
+            style={{
+              padding: "6px 12px",
+              fontSize: 13,
+              cursor: kwLoading ? "wait" : "pointer",
+              borderRadius: 6,
+              border: "1px solid var(--border)",
+              background: "#f9fafb",
+            }}
+          >
+            {kwLoading && <Spinner />}
+            {kwEntities ? "Refresh" : "Load keyword config"}
+          </button>
+        </div>
+        {kwError && (
+          <p style={{ color: "#b91c1c", fontSize: 14, margin: "0 0 8px" }}>{kwError}</p>
+        )}
+        {kwEntities &&
+          kwEntities.map((ent) => {
+            const open = kwExpanded[ent.id] ?? false;
+            const draft = kwDraft[ent.id] ?? ent.keywords;
+            const newVal = kwNewInput[ent.id] ?? "";
+            return (
+              <div
+                key={ent.id}
+                style={{
+                  border: "1px solid var(--border)",
+                  borderRadius: 6,
+                  marginBottom: 8,
+                  overflow: "hidden",
+                }}
+              >
+                <button
+                  type="button"
+                  onClick={() =>
+                    setKwExpanded((prev) => ({
+                      ...prev,
+                      [ent.id]: !open,
+                    }))
+                  }
+                  style={{
+                    width: "100%",
+                    textAlign: "left",
+                    padding: "10px 12px",
+                    fontSize: 14,
+                    fontWeight: 600,
+                    border: "none",
+                    background: open ? "#f3f4f6" : "#fafafa",
+                    cursor: "pointer",
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "space-between",
+                    gap: 8,
+                  }}
+                >
+                  <span>
+                    {open ? "▼" : "▶"} {ent.name}{" "}
+                    <span
+                      style={{
+                        fontWeight: 400,
+                        fontSize: 12,
+                        color: ent.hasKeywordOverride ? "#b45309" : "var(--muted)",
+                      }}
+                    >
+                      {ent.hasKeywordOverride ? "(override)" : "(base)"}
+                    </span>
+                  </span>
+                </button>
+                {open && (
+                  <div style={{ padding: "12px", background: "#fff" }}>
+                    <p style={{ fontSize: 12, color: "var(--muted)", margin: "0 0 8px" }}>
+                      Aliases: {ent.aliases.join(", ")}
+                    </p>
+                    <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 10 }}>
+                      {draft.map((kw, idx) => (
+                        <button
+                          key={`${ent.id}-${idx}-${kw}`}
+                          type="button"
+                          title="Click to remove"
+                          onClick={() =>
+                            setKwDraft((prev) => ({
+                              ...prev,
+                              [ent.id]: (prev[ent.id] ?? []).filter((_, i) => i !== idx),
+                            }))
+                          }
+                          style={{
+                            fontSize: 13,
+                            padding: "4px 10px",
+                            borderRadius: 999,
+                            border: "1px solid #d1d5db",
+                            background: "#f9fafb",
+                            cursor: "pointer",
+                          }}
+                        >
+                          {kw} ×
+                        </button>
+                      ))}
+                    </div>
+                    <div style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center" }}>
+                      <input
+                        type="text"
+                        value={newVal}
+                        placeholder="Add keyword…"
+                        onChange={(e) =>
+                          setKwNewInput((prev) => ({
+                            ...prev,
+                            [ent.id]: e.target.value,
+                          }))
+                        }
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter") {
+                            e.preventDefault();
+                            const t = newVal.trim();
+                            if (!t) return;
+                            setKwDraft((prev) => {
+                              const cur = prev[ent.id] ?? [];
+                              if (cur.includes(t)) return prev;
+                              return { ...prev, [ent.id]: [...cur, t] };
+                            });
+                            setKwNewInput((prev) => ({ ...prev, [ent.id]: "" }));
+                          }
+                        }}
+                        style={{
+                          padding: "6px 10px",
+                          fontSize: 14,
+                          minWidth: "12rem",
+                          border: "1px solid var(--border)",
+                          borderRadius: 6,
+                        }}
+                      />
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const t = newVal.trim();
+                          if (!t) return;
+                          setKwDraft((prev) => {
+                            const cur = prev[ent.id] ?? [];
+                            if (cur.includes(t)) return prev;
+                            return { ...prev, [ent.id]: [...cur, t] };
+                          });
+                          setKwNewInput((prev) => ({ ...prev, [ent.id]: "" }));
+                        }}
+                        style={{
+                          padding: "6px 12px",
+                          fontSize: 13,
+                          cursor: "pointer",
+                          borderRadius: 6,
+                          border: "1px solid var(--border)",
+                          background: "#fff",
+                        }}
+                      >
+                        Add
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => saveEntityKeywords(ent.id)}
+                        disabled={kwSavingId === ent.id}
+                        style={{
+                          padding: "6px 14px",
+                          fontSize: 13,
+                          cursor: kwSavingId === ent.id ? "wait" : "pointer",
+                          borderRadius: 6,
+                          border: "1px solid #2563eb",
+                          background: "#2563eb",
+                          color: "#fff",
+                        }}
+                      >
+                        {kwSavingId === ent.id && <Spinner />}
+                        Save
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            );
+          })}
       </section>
 
       <section style={panelStyle}>
