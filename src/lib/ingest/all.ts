@@ -1,5 +1,6 @@
 import { promises as fs } from "fs";
 import type { Article } from "@/lib/types";
+import { fetchFullText } from "@/lib/sources/full-text";
 import { fetchNewstalkzbArticles } from "@/lib/sources/newstalkzb";
 import { fetchNzheraldArticles } from "@/lib/sources/nzherald";
 import { fetchRnzArticles } from "@/lib/sources/rnz";
@@ -47,12 +48,20 @@ function serializeArticles(articles: Article[]): SerializedArticle[] {
   }));
 }
 
+const FULL_TEXT_DELAY_MS = 300;
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 export type IngestAllResult = {
   ok: boolean;
   updatedAt: string;
   path: string;
   totalUnique: number;
   bySource: Record<SourceKey, number>;
+  fullTextEnriched: number;
+  fullTextFallback: number;
   errors: IngestErrorMap;
 };
 
@@ -92,6 +101,33 @@ export async function ingestAll(): Promise<IngestAllResult> {
   }
 
   const unique = dedupeByUrl(combined);
+
+  let fullTextEnriched = 0;
+  let fullTextFallback = 0;
+  const nonPaywalled = unique.filter((a) => !a.paywalled);
+
+  for (let i = 0; i < nonPaywalled.length; i++) {
+    const article = nonPaywalled[i];
+    try {
+      const text = await fetchFullText(article.url);
+      if (text && text.length > article.body.length) {
+        article.body = text;
+        fullTextEnriched++;
+      } else {
+        fullTextFallback++;
+      }
+    } catch {
+      fullTextFallback++;
+    }
+    if (i < nonPaywalled.length - 1) {
+      await sleep(FULL_TEXT_DELAY_MS);
+    }
+  }
+
+  console.log(
+    `[ingest] Full-text enrichment: ${fullTextEnriched} enriched, ${fullTextFallback} kept RSS summary (of ${nonPaywalled.length} non-paywalled)`
+  );
+
   const updatedAt = new Date().toISOString();
 
   await fs.writeFile(
@@ -113,6 +149,8 @@ export async function ingestAll(): Promise<IngestAllResult> {
     path: ARTICLES_JSON_PATH,
     totalUnique: unique.length,
     bySource,
+    fullTextEnriched,
+    fullTextFallback,
     errors,
   };
 }
