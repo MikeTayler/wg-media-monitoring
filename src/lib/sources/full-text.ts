@@ -17,6 +17,9 @@ function isStuffUrl(url: string): boolean {
   }
 }
 
+// TODO: remove after diagnosis
+let _stuffHtmlLogged = false;
+
 async function fetchStuffFallback(url: string): Promise<string | null> {
   try {
     const controller = new AbortController();
@@ -35,6 +38,12 @@ async function fetchStuffFallback(url: string): Promise<string | null> {
     }
 
     const html = await res.text();
+
+    if (!_stuffHtmlLogged) {
+      console.log("[full-text] Stuff HTML preview:", html.substring(0, 500));
+      _stuffHtmlLogged = true;
+    }
+
     const $ = cheerio.load(html);
     const el = $(STUFF_BODY_SELECTOR);
 
