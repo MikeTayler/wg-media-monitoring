@@ -443,21 +443,50 @@ export default function AdminDashboardPage() {
             </div>
           </dl>
         )}
-        <button
-          type="button"
-          onClick={() => loadStatus()}
+        <div
           style={{
             marginTop: 12,
-            padding: "6px 12px",
-            fontSize: 13,
-            cursor: "pointer",
-            borderRadius: 6,
-            border: "1px solid var(--border)",
-            background: "#f9fafb",
+            display: "flex",
+            flexWrap: "wrap",
+            gap: 8,
+            alignItems: "center",
           }}
         >
-          Refresh status
-        </button>
+          <button
+            type="button"
+            onClick={() => loadStatus()}
+            style={{
+              padding: "6px 12px",
+              fontSize: 13,
+              cursor: "pointer",
+              borderRadius: 6,
+              border: "1px solid var(--border)",
+              background: "#f9fafb",
+            }}
+          >
+            Refresh status
+          </button>
+          {cronSecret.trim() ? (
+            <a
+              href={`/api/articles?secret=${encodeURIComponent(cronSecret.trim())}`}
+              target="_blank"
+              rel="noopener noreferrer"
+              style={{
+                display: "inline-block",
+                padding: "6px 12px",
+                fontSize: 13,
+                borderRadius: 6,
+                border: "1px solid var(--border)",
+                background: "#f9fafb",
+                color: "#111827",
+                textDecoration: "none",
+                cursor: "pointer",
+              }}
+            >
+              View raw articles
+            </a>
+          ) : null}
+        </div>
       </section>
 
       <section style={panelStyle}>
