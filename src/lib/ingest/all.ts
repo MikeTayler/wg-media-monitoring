@@ -114,6 +114,11 @@ export async function ingestAll(): Promise<IngestAllResult> {
         article.body = text;
         fullTextEnriched++;
       } else {
+        if (text) {
+          console.log(
+            `[ingest] Kept RSS body for ${article.url}: extracted ${text.length} chars <= existing ${article.body.length} chars`
+          );
+        }
         fullTextFallback++;
       }
     } catch {

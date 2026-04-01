@@ -22,13 +22,29 @@ export async function fetchFullText(url: string): Promise<string | null> {
 
     clearTimeout(timer);
 
-    if (!result?.content) return null;
+    if (!result) {
+      console.log(`[full-text] ${url}: extracted 0 chars (extractor returned null)`);
+      return null;
+    }
+
+    if (!result.content) {
+      console.log(`[full-text] ${url}: extracted 0 chars (result has no content field)`);
+      return null;
+    }
 
     const text = htmlToPlainText(result.content);
-    return text.length > 0 ? text : null;
+
+    if (text.length === 0) {
+      console.log(`[full-text] ${url}: extracted 0 chars (content was HTML-only / empty after stripping)`);
+      return null;
+    }
+
+    console.log(`[full-text] ${url}: extracted ${text.length} chars`);
+    return text;
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    console.warn(`[full-text] Failed for ${url}: ${msg}`);
+    const reason = msg.includes("abort") ? "timeout" : msg;
+    console.log(`[full-text] ${url}: extracted 0 chars (error: ${reason})`);
     return null;
   }
 }
