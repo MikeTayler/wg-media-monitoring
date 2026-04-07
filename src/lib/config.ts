@@ -1,14 +1,13 @@
 /**
  * Entity/keyword/recipient configuration — reads from Neon Postgres.
  * Falls back to empty arrays if the DB is unreachable (pipeline will log warnings).
+ *
+ * NOTE: Neon's tagged-template result is array-like but not iterable —
+ * always use index-based loops (`for i`) instead of `for...of` or `.map()`.
  */
 
 import { getDb } from "@/lib/db";
 import type { Entity } from "@/lib/types";
-
-type DbEntityRow = { id: number; name: string; enabled: boolean };
-type DbKeywordRow = { entity_id: number; keyword: string };
-type DbRecipientRow = { entity_id: number; email: string };
 
 /**
  * Load entities with their keywords and enabled recipients from the database.
@@ -19,59 +18,77 @@ type DbRecipientRow = { entity_id: number; email: string };
 export async function getEntities(): Promise<Entity[]> {
   const sql = getDb();
 
-  const entities = (await sql`
+  const entityRows = await sql`
     SELECT id, name, enabled FROM entities WHERE enabled = true ORDER BY id
-  `) as DbEntityRow[];
+  `;
 
-  const keywords = (await sql`
+  const keywordRows = await sql`
     SELECT entity_id, keyword FROM keywords ORDER BY entity_id, id
-  `) as DbKeywordRow[];
+  `;
 
-  const recipients = (await sql`
+  const recipientRows = await sql`
     SELECT entity_id, email FROM recipients WHERE enabled = true AND entity_id IS NOT NULL ORDER BY entity_id, id
-  `) as DbRecipientRow[];
+  `;
 
-  const kwMap = new Map<number, string[]>();
-  for (const kw of keywords) {
-    if (!kwMap.has(kw.entity_id)) kwMap.set(kw.entity_id, []);
-    kwMap.get(kw.entity_id)!.push(kw.keyword);
+  const kwMap: Record<string, string[]> = {};
+  for (let i = 0; i < keywordRows.length; i++) {
+    const kw = keywordRows[i];
+    const eid = String(kw.entity_id);
+    if (!kwMap[eid]) kwMap[eid] = [];
+    kwMap[eid].push(String(kw.keyword));
   }
 
-  const rcMap = new Map<number, string[]>();
-  for (const rc of recipients) {
-    if (!rcMap.has(rc.entity_id)) rcMap.set(rc.entity_id, []);
-    rcMap.get(rc.entity_id)!.push(rc.email);
+  const rcMap: Record<string, string[]> = {};
+  for (let i = 0; i < recipientRows.length; i++) {
+    const rc = recipientRows[i];
+    const eid = String(rc.entity_id);
+    if (!rcMap[eid]) rcMap[eid] = [];
+    rcMap[eid].push(String(rc.email));
   }
 
-  return entities.map((e) => ({
-    id: String(e.id),
-    name: e.name,
-    aliases: [e.name],
-    keywords: kwMap.get(e.id) ?? [],
-    recipients: rcMap.get(e.id) ?? [],
-  }));
+  const out: Entity[] = [];
+  for (let i = 0; i < entityRows.length; i++) {
+    const e = entityRows[i];
+    const eid = String(e.id);
+    out.push({
+      id: eid,
+      name: String(e.name),
+      aliases: [String(e.name)],
+      keywords: kwMap[eid] ?? [],
+      recipients: rcMap[eid] ?? [],
+    });
+  }
+  return out;
 }
 
 /** All distinct enabled entity-scoped recipient emails (for cron digest sends). */
 export async function getEntityRecipientEmails(): Promise<string[]> {
   const sql = getDb();
-  const rows = (await sql`
+  const rows = await sql`
     SELECT DISTINCT r.email
     FROM recipients r
     JOIN entities e ON e.id = r.entity_id
     WHERE r.enabled = true AND e.enabled = true
     ORDER BY r.email
-  `) as Array<{ email: string }>;
-  return rows.map((r) => r.email);
+  `;
+  const out: string[] = [];
+  for (let i = 0; i < rows.length; i++) {
+    out.push(String(rows[i].email));
+  }
+  return out;
 }
 
 /** All distinct enabled admin recipient emails (entity_id IS NULL). */
 export async function getAdminRecipientEmails(): Promise<string[]> {
   const sql = getDb();
-  const rows = (await sql`
+  const rows = await sql`
     SELECT DISTINCT email FROM recipients
     WHERE entity_id IS NULL AND enabled = true
     ORDER BY email
-  `) as Array<{ email: string }>;
-  return rows.map((r) => r.email);
+  `;
+  const out: string[] = [];
+  for (let i = 0; i < rows.length; i++) {
+    out.push(String(rows[i].email));
+  }
+  return out;
 }

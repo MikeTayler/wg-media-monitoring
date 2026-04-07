@@ -4,8 +4,6 @@ import { getDb } from "@/lib/db";
 
 export const dynamic = "force-dynamic";
 
-type RecipientRow = { id: number; entity_id: number | null; email: string; enabled: boolean; entity_name: string | null };
-
 /** Recipients grouped by entity, with an "Admin" group for entity_id IS NULL. */
 export async function GET(request: Request) {
   if (!authorizeCron(request)) {
@@ -13,29 +11,31 @@ export async function GET(request: Request) {
   }
 
   const sql = getDb();
-  const rows = (await sql`
+  const rows = await sql`
     SELECT r.id, r.entity_id, r.email, r.enabled, e.name AS entity_name
     FROM recipients r
     LEFT JOIN entities e ON e.id = r.entity_id
     ORDER BY r.entity_id NULLS FIRST, r.id
-  `) as RecipientRow[];
+  `;
 
   type Group = { entity_id: number | null; entity_name: string; recipients: Array<{ id: number; email: string; enabled: boolean }> };
   const groups: Group[] = [];
   const groupMap = new Map<string, Group>();
 
-  for (const r of rows) {
-    const key = r.entity_id == null ? "__admin__" : String(r.entity_id);
+  for (let i = 0; i < rows.length; i++) {
+    const r = rows[i];
+    const eid = r.entity_id == null ? null : Number(r.entity_id);
+    const key = eid == null ? "__admin__" : String(eid);
     if (!groupMap.has(key)) {
       const g: Group = {
-        entity_id: r.entity_id,
-        entity_name: r.entity_id == null ? "Admin" : (r.entity_name ?? "Unknown"),
+        entity_id: eid,
+        entity_name: eid == null ? "Admin" : (r.entity_name ? String(r.entity_name) : "Unknown"),
         recipients: [],
       };
       groupMap.set(key, g);
       groups.push(g);
     }
-    groupMap.get(key)!.recipients.push({ id: r.id, email: r.email, enabled: r.enabled });
+    groupMap.get(key)!.recipients.push({ id: Number(r.id), email: String(r.email), enabled: Boolean(r.enabled) });
   }
 
   return NextResponse.json({ ok: true, groups });

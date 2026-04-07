@@ -11,48 +11,49 @@ export async function GET(request: Request) {
 
   const sql = getDb();
 
-  const entityRows = Array.from(await sql`SELECT id, name, enabled, created_at FROM entities ORDER BY id`);
-  const keywordRows = Array.from(await sql`SELECT id, entity_id, keyword FROM keywords ORDER BY entity_id, id`);
-  const recipientRows = Array.from(await sql`SELECT id, entity_id, email, enabled FROM recipients WHERE entity_id IS NOT NULL ORDER BY entity_id, id`);
-  const adminRows = Array.from(await sql`SELECT id, email, enabled FROM recipients WHERE entity_id IS NULL ORDER BY id`);
-
-  const kwCount = await sql`SELECT count(*) AS n FROM keywords`;
-  const rcCount = await sql`SELECT count(*) AS n FROM recipients`;
-  console.log(`[entities] table counts: keywords=${kwCount[0]?.n}, recipients=${rcCount[0]?.n}`);
-  console.log(`[entities] query rows: entities=${entityRows.length}, keywords=${keywordRows.length}, recipients=${recipientRows.length}, admin=${adminRows.length}`);
-  if (keywordRows.length === 0 && Number(kwCount[0]?.n) > 0) {
-    const rawKw = await sql`SELECT * FROM keywords LIMIT 3`;
-    console.log("[entities] raw keywords sample:", JSON.stringify(rawKw));
-  }
+  const entityRows = await sql`SELECT id, name, enabled, created_at FROM entities ORDER BY id`;
+  const keywordRows = await sql`SELECT id, entity_id, keyword FROM keywords ORDER BY entity_id, id`;
+  const recipientRows = await sql`SELECT id, entity_id, email, enabled FROM recipients WHERE entity_id IS NOT NULL ORDER BY entity_id, id`;
+  const adminRows = await sql`SELECT id, email, enabled FROM recipients WHERE entity_id IS NULL ORDER BY id`;
 
   const kwMap: Record<string, Array<{ id: number; keyword: string }>> = {};
-  for (const row of keywordRows) {
+  for (let i = 0; i < keywordRows.length; i++) {
+    const row = keywordRows[i];
     const eid = String(row.entity_id);
     if (!kwMap[eid]) kwMap[eid] = [];
     kwMap[eid].push({ id: Number(row.id), keyword: String(row.keyword) });
   }
 
   const rcMap: Record<string, Array<{ id: number; email: string; enabled: boolean }>> = {};
-  for (const row of recipientRows) {
+  for (let i = 0; i < recipientRows.length; i++) {
+    const row = recipientRows[i];
     const eid = String(row.entity_id);
     if (!rcMap[eid]) rcMap[eid] = [];
     rcMap[eid].push({ id: Number(row.id), email: String(row.email), enabled: Boolean(row.enabled) });
   }
 
-  const entities = entityRows.map((e) => ({
-    id: Number(e.id),
-    name: String(e.name),
-    enabled: Boolean(e.enabled),
-    created_at: String(e.created_at),
-    keywords: kwMap[String(e.id)] ?? [],
-    recipients: rcMap[String(e.id)] ?? [],
-  }));
+  const entities = [];
+  for (let i = 0; i < entityRows.length; i++) {
+    const e = entityRows[i];
+    entities.push({
+      id: Number(e.id),
+      name: String(e.name),
+      enabled: Boolean(e.enabled),
+      created_at: String(e.created_at),
+      keywords: kwMap[String(e.id)] ?? [],
+      recipients: rcMap[String(e.id)] ?? [],
+    });
+  }
 
-  const adminRecipients = adminRows.map((r) => ({
-    id: Number(r.id),
-    email: String(r.email),
-    enabled: Boolean(r.enabled),
-  }));
+  const adminRecipients = [];
+  for (let i = 0; i < adminRows.length; i++) {
+    const r = adminRows[i];
+    adminRecipients.push({
+      id: Number(r.id),
+      email: String(r.email),
+      enabled: Boolean(r.enabled),
+    });
+  }
 
   return NextResponse.json({ ok: true, entities, adminRecipients });
 }

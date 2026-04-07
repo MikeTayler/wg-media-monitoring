@@ -11,8 +11,6 @@ const ALLOWED_KEYS = new Set([
   "cron_timezone",
 ]);
 
-type SettingRow = { key: string; value: string; updated_at: string };
-
 /** All settings as a key-value object. */
 export async function GET(request: Request) {
   if (!authorizeCron(request)) {
@@ -20,11 +18,11 @@ export async function GET(request: Request) {
   }
 
   const sql = getDb();
-  const rows = (await sql`SELECT key, value, updated_at FROM settings ORDER BY key`) as SettingRow[];
+  const rows = await sql`SELECT key, value, updated_at FROM settings ORDER BY key`;
 
   const settings: Record<string, string> = {};
-  for (const r of rows) {
-    settings[r.key] = r.value;
+  for (let i = 0; i < rows.length; i++) {
+    settings[String(rows[i].key)] = String(rows[i].value);
   }
 
   return NextResponse.json({ ok: true, settings });

@@ -4,8 +4,6 @@ import { getDb } from "@/lib/db";
 
 export const dynamic = "force-dynamic";
 
-type KeywordRow = { id: number; entity_id: number; keyword: string; entity_name: string };
-
 /** Keywords grouped by entity. */
 export async function GET(request: Request) {
   if (!authorizeCron(request)) {
@@ -13,20 +11,21 @@ export async function GET(request: Request) {
   }
 
   const sql = getDb();
-  const rows = (await sql`
+  const rows = await sql`
     SELECT k.id, k.entity_id, k.keyword, e.name AS entity_name
     FROM keywords k
     JOIN entities e ON e.id = k.entity_id
     ORDER BY k.entity_id, k.id
-  `) as KeywordRow[];
+  `;
 
   const grouped: Record<string, { entity_id: number; entity_name: string; keywords: Array<{ id: number; keyword: string }> }> = {};
-  for (const r of rows) {
+  for (let i = 0; i < rows.length; i++) {
+    const r = rows[i];
     const key = String(r.entity_id);
     if (!grouped[key]) {
-      grouped[key] = { entity_id: r.entity_id, entity_name: r.entity_name, keywords: [] };
+      grouped[key] = { entity_id: Number(r.entity_id), entity_name: String(r.entity_name), keywords: [] };
     }
-    grouped[key].keywords.push({ id: r.id, keyword: r.keyword });
+    grouped[key].keywords.push({ id: Number(r.id), keyword: String(r.keyword) });
   }
 
   return NextResponse.json({ ok: true, groups: Object.values(grouped) });
