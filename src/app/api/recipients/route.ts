@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { authorizeCron } from "@/lib/api/cron-auth";
-import { getDb } from "@/lib/db";
+import { getDb, query } from "@/lib/db";
 
 export const dynamic = "force-dynamic";
 
@@ -10,20 +10,18 @@ export async function GET(request: Request) {
     return NextResponse.json({ ok: false, error: "Unauthorized" }, { status: 401 });
   }
 
-  const sql = getDb();
-  const rows = await sql`
-    SELECT r.id, r.entity_id, r.email, r.enabled, e.name AS entity_name
-    FROM recipients r
-    LEFT JOIN entities e ON e.id = r.entity_id
-    ORDER BY r.entity_id NULLS FIRST, r.id
-  `;
+  const rows = await query(
+    `SELECT r.id, r.entity_id, r.email, r.enabled, e.name AS entity_name
+     FROM recipients r
+     LEFT JOIN entities e ON e.id = r.entity_id
+     ORDER BY r.entity_id NULLS FIRST, r.id`
+  );
 
   type Group = { entity_id: number | null; entity_name: string; recipients: Array<{ id: number; email: string; enabled: boolean }> };
   const groups: Group[] = [];
   const groupMap = new Map<string, Group>();
 
-  for (let i = 0; i < rows.length; i++) {
-    const r = rows[i];
+  for (const r of rows) {
     const eid = r.entity_id == null ? null : Number(r.entity_id);
     const key = eid == null ? "__admin__" : String(eid);
     if (!groupMap.has(key)) {

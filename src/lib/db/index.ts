@@ -19,3 +19,18 @@ export function getDb(): NeonQueryFunction<false, false> {
   _sql = neon(url);
   return _sql;
 }
+
+/**
+ * Run a parameterised SQL query via `.query()` and return rows as a plain array.
+ * Uses the `.query()` method (string + params) instead of the tagged-template
+ * syntax to work around a Vercel bundling issue where tagged-template SELECT
+ * results silently return length 0 for some queries.
+ */
+export async function query<T extends Record<string, unknown> = Record<string, unknown>>(
+  text: string,
+  params: unknown[] = []
+): Promise<T[]> {
+  const sql = getDb();
+  const rows = await sql.query(text, params);
+  return rows as T[];
+}

@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { authorizeCron } from "@/lib/api/cron-auth";
-import { getDb } from "@/lib/db";
+import { getDb, query } from "@/lib/db";
 
 export const dynamic = "force-dynamic";
 
@@ -10,17 +10,15 @@ export async function GET(request: Request) {
     return NextResponse.json({ ok: false, error: "Unauthorized" }, { status: 401 });
   }
 
-  const sql = getDb();
-  const rows = await sql`
-    SELECT k.id, k.entity_id, k.keyword, e.name AS entity_name
-    FROM keywords k
-    JOIN entities e ON e.id = k.entity_id
-    ORDER BY k.entity_id, k.id
-  `;
+  const rows = await query(
+    `SELECT k.id, k.entity_id, k.keyword, e.name AS entity_name
+     FROM keywords k
+     JOIN entities e ON e.id = k.entity_id
+     ORDER BY k.entity_id, k.id`
+  );
 
   const grouped: Record<string, { entity_id: number; entity_name: string; keywords: Array<{ id: number; keyword: string }> }> = {};
-  for (let i = 0; i < rows.length; i++) {
-    const r = rows[i];
+  for (const r of rows) {
     const key = String(r.entity_id);
     if (!grouped[key]) {
       grouped[key] = { entity_id: Number(r.entity_id), entity_name: String(r.entity_name), keywords: [] };

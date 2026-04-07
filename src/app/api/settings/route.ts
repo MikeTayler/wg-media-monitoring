@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { authorizeCron } from "@/lib/api/cron-auth";
-import { getDb } from "@/lib/db";
+import { getDb, query } from "@/lib/db";
 
 export const dynamic = "force-dynamic";
 
@@ -17,12 +17,11 @@ export async function GET(request: Request) {
     return NextResponse.json({ ok: false, error: "Unauthorized" }, { status: 401 });
   }
 
-  const sql = getDb();
-  const rows = await sql`SELECT key, value, updated_at FROM settings ORDER BY key`;
+  const rows = await query("SELECT key, value, updated_at FROM settings ORDER BY key");
 
   const settings: Record<string, string> = {};
-  for (let i = 0; i < rows.length; i++) {
-    settings[String(rows[i].key)] = String(rows[i].value);
+  for (const r of rows) {
+    settings[String(r.key)] = String(r.value);
   }
 
   return NextResponse.json({ ok: true, settings });
