@@ -1,5 +1,9 @@
 import { readFile } from "fs/promises";
-import { DIGEST_SOLO_TEST_EMAIL, getEntities } from "@/lib/config";
+import {
+  DIGEST_SOLO_TEST_EMAIL,
+  getEntities,
+  getDigestRecipientEmails,
+} from "@/lib/config";
 import {
   RELEVANCE_DISCARD_BELOW,
   scoreArticleRelevance,
@@ -10,7 +14,7 @@ import { renderDigestHtml, scoreToRelevanceBand } from "@/lib/email/template";
 import type { DigestArticleRow, DigestSection } from "@/lib/email/template";
 import { sendDigestEmail } from "@/lib/email/sender";
 import { ARTICLES_JSON_PATH } from "@/lib/ingest/all";
-import type { Article } from "@/lib/types";
+import type { Article, Entity } from "@/lib/types";
 
 type StoredFile = {
   updatedAt?: string;
@@ -53,37 +57,29 @@ export async function loadArticlesFromStore(): Promise<Article[]> {
   return reviveArticles(data);
 }
 
-function entityById(id: string) {
-  return getEntities().find((e) => e.id === id);
-}
-
-/** All distinct recipient emails that appear on at least one non-global entity. */
-export function getDigestRecipientEmails(): string[] {
-  const set = new Set<string>();
-  for (const e of getEntities()) {
-    if (e.id === "global") continue;
-    for (const r of e.recipients) set.add(r);
-  }
-  return Array.from(set).sort();
+function entityById(entities: Entity[], id: string) {
+  return entities.find((e) => e.id === id);
 }
 
 export function recipientSubscribedToEntity(
   email: string,
-  entityId: string
+  entityId: string,
+  entities: Entity[]
 ): boolean {
   if (entityId === "global") {
     return true;
   }
-  const ent = entityById(entityId);
+  const ent = entityById(entities, entityId);
   return ent?.recipients.includes(email) ?? false;
 }
 
 export function filterEntriesForRecipient(
   email: string,
-  entries: ScoredDigestEntry[]
+  entries: ScoredDigestEntry[],
+  entities: Entity[]
 ): ScoredDigestEntry[] {
   return entries.filter((entry) =>
-    recipientSubscribedToEntity(email, entry.entityId)
+    recipientSubscribedToEntity(email, entry.entityId, entities)
   );
 }
 
@@ -94,16 +90,18 @@ export function filterEntriesForRecipient(
 function digestEntriesForEmail(
   soloTest: boolean,
   recipientEmail: string,
-  scoredEntries: ScoredDigestEntry[]
+  scoredEntries: ScoredDigestEntry[],
+  entities: Entity[]
 ): ScoredDigestEntry[] {
   if (soloTest) {
     return scoredEntries;
   }
-  return filterEntriesForRecipient(recipientEmail, scoredEntries);
+  return filterEntriesForRecipient(recipientEmail, scoredEntries, entities);
 }
 
 export function buildSectionsForRecipient(
-  entries: ScoredDigestEntry[]
+  entries: ScoredDigestEntry[],
+  entities: Entity[]
 ): DigestSection[] {
   const byEntity = new Map<string, ScoredDigestEntry[]>();
   for (const e of entries) {
@@ -112,7 +110,7 @@ export function buildSectionsForRecipient(
   }
 
   const sections: DigestSection[] = [];
-  for (const ent of getEntities()) {
+  for (const ent of entities) {
     const list = byEntity.get(ent.id);
     if (!list || list.length === 0) continue;
 
@@ -146,17 +144,18 @@ export function digestEmailSubject(): string {
  * Keyword match → AI score (≥40) → summary. Returns scored entries and keyword match count.
  */
 export async function buildScoredDigestEntries(
-  articles: Article[]
+  articles: Article[],
+  entities: Entity[]
 ): Promise<{ entries: ScoredDigestEntry[]; keywordMatchPairs: number }> {
   let keywordMatchPairs = 0;
   const entries: ScoredDigestEntry[] = [];
 
   for (const article of articles) {
-    const matches = matchArticleToEntities(article);
+    const matches = matchArticleToEntities(article, entities);
     keywordMatchPairs += matches.length;
 
     for (const m of matches) {
-      const entity = entityById(m.entityId);
+      const entity = entityById(entities, m.entityId);
       if (!entity) continue;
 
       const { score, reason } = await scoreArticleRelevance({
@@ -232,16 +231,17 @@ export async function runDigestPipeline(options: {
   }
 
   const articlesProcessed = articles.length;
+  const entities = await getEntities();
 
   const { entries: scoredEntries, keywordMatchPairs } =
-    await buildScoredDigestEntries(articles);
+    await buildScoredDigestEntries(articles, entities);
 
   const digestEntriesAfterScoring = scoredEntries.length;
 
   const soloTest = options.soloTest === true;
   const recipients = soloTest
     ? [DIGEST_SOLO_TEST_EMAIL]
-    : getDigestRecipientEmails();
+    : await getDigestRecipientEmails();
   const recipientsTargeted = recipients.length;
 
   if (recipients.length === 0) {
@@ -267,9 +267,10 @@ export async function runDigestPipeline(options: {
     const filtered = digestEntriesForEmail(
       soloTest,
       previewRecipient,
-      scoredEntries
+      scoredEntries,
+      entities
     );
-    const sections = buildSectionsForRecipient(filtered);
+    const sections = buildSectionsForRecipient(filtered, entities);
     const previewHtml = renderDigestHtml(sections);
 
     console.log(
@@ -295,8 +296,8 @@ export async function runDigestPipeline(options: {
   let emailsSent = 0;
 
   if (soloTest) {
-    const filtered = digestEntriesForEmail(true, recipients[0], scoredEntries);
-    const sections = buildSectionsForRecipient(filtered);
+    const filtered = digestEntriesForEmail(true, recipients[0], scoredEntries, entities);
+    const sections = buildSectionsForRecipient(filtered, entities);
     const html = renderDigestHtml(sections);
     const result = await sendDigestEmail({
       to: recipients[0],
@@ -306,8 +307,8 @@ export async function runDigestPipeline(options: {
     if (result.ok) emailsSent = 1;
   } else {
     for (const email of recipients) {
-      const filtered = digestEntriesForEmail(false, email, scoredEntries);
-      const sections = buildSectionsForRecipient(filtered);
+      const filtered = digestEntriesForEmail(false, email, scoredEntries, entities);
+      const sections = buildSectionsForRecipient(filtered, entities);
       const html = renderDigestHtml(sections);
 
       const result = await sendDigestEmail({ to: email, subject, html });

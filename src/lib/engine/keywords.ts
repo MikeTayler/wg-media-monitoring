@@ -1,4 +1,3 @@
-import { getEntities } from "@/lib/config";
 import type { Article, Entity } from "@/lib/types";
 
 /** One entity that matched the article, with the phrases that triggered it. */
@@ -37,14 +36,17 @@ function matchedTermsForEntity(haystack: string, entity: Entity): string[] {
 }
 
 /**
- * First-stage filter: match article title + body against each entity’s aliases and keywords.
- * No boolean AND/OR/NOT — any phrase match counts. Macrons and UTF-8 are preserved; comparison is case-insensitive only.
+ * First-stage filter: match article title + body against each entity's aliases and keywords.
+ * Entities are passed in (loaded from DB by the caller).
  */
-export function matchArticleToEntities(article: Article): EntityKeywordMatch[] {
+export function matchArticleToEntities(
+  article: Article,
+  entities: Entity[]
+): EntityKeywordMatch[] {
   const haystack = buildHaystack(article);
   const out: EntityKeywordMatch[] = [];
 
-  for (const entity of getEntities()) {
+  for (const entity of entities) {
     const matchedKeywords = matchedTermsForEntity(haystack, entity);
     if (matchedKeywords.length === 0) continue;
     out.push({
@@ -61,11 +63,12 @@ export function matchArticleToEntities(article: Article): EntityKeywordMatch[] {
  * Run keyword matching over many articles (same rules as {@link matchArticleToEntities}).
  */
 export function matchArticlesToEntities(
-  articles: Article[]
+  articles: Article[],
+  entities: Entity[]
 ): Map<string, EntityKeywordMatch[]> {
   const map = new Map<string, EntityKeywordMatch[]>();
   for (const article of articles) {
-    map.set(article.id, matchArticleToEntities(article));
+    map.set(article.id, matchArticleToEntities(article, entities));
   }
   return map;
 }

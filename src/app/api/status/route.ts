@@ -1,6 +1,5 @@
 import { NextResponse } from "next/server";
-import { DIGEST_SOLO_TEST_EMAIL } from "@/lib/config";
-import { getDigestRecipientEmails } from "@/lib/digest/pipeline";
+import { DIGEST_SOLO_TEST_EMAIL, getDigestRecipientEmails } from "@/lib/config";
 import {
   filterErrorsLast24h,
   readPipelineStatus,
@@ -16,7 +15,8 @@ export async function GET() {
   try {
     const raw = await readPipelineStatus();
     const errors = filterErrorsLast24h(raw.errors);
-    const configuredRecipientCount = getDigestRecipientEmails().length;
+    const recipientEmails = await getDigestRecipientEmails();
+    const configuredRecipientCount = recipientEmails.length;
 
     return NextResponse.json({
       ok: true,
