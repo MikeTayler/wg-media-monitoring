@@ -16,9 +16,13 @@ export async function GET(request: Request) {
   const recipientRows = Array.from(await sql`SELECT id, entity_id, email, enabled FROM recipients WHERE entity_id IS NOT NULL ORDER BY entity_id, id`);
   const adminRows = Array.from(await sql`SELECT id, email, enabled FROM recipients WHERE entity_id IS NULL ORDER BY id`);
 
-  console.log(`[entities] rows: entities=${entityRows.length}, keywords=${keywordRows.length}, recipients=${recipientRows.length}, admin=${adminRows.length}`);
-  if (keywordRows.length > 0) {
-    console.log("[entities] sample keyword row:", JSON.stringify(keywordRows[0]));
+  const kwCount = await sql`SELECT count(*) AS n FROM keywords`;
+  const rcCount = await sql`SELECT count(*) AS n FROM recipients`;
+  console.log(`[entities] table counts: keywords=${kwCount[0]?.n}, recipients=${rcCount[0]?.n}`);
+  console.log(`[entities] query rows: entities=${entityRows.length}, keywords=${keywordRows.length}, recipients=${recipientRows.length}, admin=${adminRows.length}`);
+  if (keywordRows.length === 0 && Number(kwCount[0]?.n) > 0) {
+    const rawKw = await sql`SELECT * FROM keywords LIMIT 3`;
+    console.log("[entities] raw keywords sample:", JSON.stringify(rawKw));
   }
 
   const kwMap: Record<string, Array<{ id: number; keyword: string }>> = {};
