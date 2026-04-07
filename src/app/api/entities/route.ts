@@ -4,10 +4,6 @@ import { getDb } from "@/lib/db";
 
 export const dynamic = "force-dynamic";
 
-type EntityRow = { id: number; name: string; enabled: boolean; created_at: string };
-type KeywordRow = { id: number; entity_id: number; keyword: string };
-type RecipientRow = { id: number; entity_id: number | null; email: string; enabled: boolean };
-
 export async function GET(request: Request) {
   if (!authorizeCron(request)) {
     return NextResponse.json({ ok: false, error: "Unauthorized" }, { status: 401 });
@@ -15,33 +11,39 @@ export async function GET(request: Request) {
 
   const sql = getDb();
 
-  const entities = (await sql`SELECT id, name, enabled, created_at FROM entities ORDER BY id`) as EntityRow[];
-  const keywords = (await sql`SELECT id, entity_id, keyword FROM keywords ORDER BY entity_id, id`) as KeywordRow[];
-  const recipients = (await sql`SELECT id, entity_id, email, enabled FROM recipients WHERE entity_id IS NOT NULL ORDER BY entity_id, id`) as RecipientRow[];
-  const adminRecipients = (await sql`SELECT id, entity_id, email, enabled FROM recipients WHERE entity_id IS NULL ORDER BY id`) as RecipientRow[];
+  const entityRows = await sql`SELECT id, name, enabled, created_at FROM entities ORDER BY id`;
+  const keywordRows = await sql`SELECT id, entity_id, keyword FROM keywords ORDER BY entity_id, id`;
+  const recipientRows = await sql`SELECT id, entity_id, email, enabled FROM recipients WHERE entity_id IS NOT NULL ORDER BY entity_id, id`;
+  const adminRows = await sql`SELECT id, email, enabled FROM recipients WHERE entity_id IS NULL ORDER BY id`;
 
-  const kwMap = new Map<number, KeywordRow[]>();
-  for (const kw of keywords) {
-    if (!kwMap.has(kw.entity_id)) kwMap.set(kw.entity_id, []);
-    kwMap.get(kw.entity_id)!.push(kw);
+  const kwMap = new Map<number, Array<{ id: number; keyword: string }>>();
+  for (const row of keywordRows) {
+    const eid = Number(row.entity_id);
+    if (!kwMap.has(eid)) kwMap.set(eid, []);
+    kwMap.get(eid)!.push({ id: Number(row.id), keyword: String(row.keyword) });
   }
 
-  const rcMap = new Map<number, RecipientRow[]>();
-  for (const rc of recipients) {
-    if (rc.entity_id == null) continue;
-    if (!rcMap.has(rc.entity_id)) rcMap.set(rc.entity_id, []);
-    rcMap.get(rc.entity_id)!.push(rc);
+  const rcMap = new Map<number, Array<{ id: number; email: string; enabled: boolean }>>();
+  for (const row of recipientRows) {
+    const eid = Number(row.entity_id);
+    if (!rcMap.has(eid)) rcMap.set(eid, []);
+    rcMap.get(eid)!.push({ id: Number(row.id), email: String(row.email), enabled: Boolean(row.enabled) });
   }
 
-  const result = entities.map((e) => ({
-    ...e,
-    keywords: kwMap.get(e.id) ?? [],
-    recipients: rcMap.get(e.id) ?? [],
+  const entities = entityRows.map((e) => ({
+    id: Number(e.id),
+    name: String(e.name),
+    enabled: Boolean(e.enabled),
+    created_at: String(e.created_at),
+    keywords: kwMap.get(Number(e.id)) ?? [],
+    recipients: rcMap.get(Number(e.id)) ?? [],
   }));
 
-  return NextResponse.json({
-    ok: true,
-    entities: result,
-    adminRecipients: adminRecipients.map((r) => ({ id: r.id, email: r.email, enabled: r.enabled })),
-  });
+  const adminRecipients = adminRows.map((r) => ({
+    id: Number(r.id),
+    email: String(r.email),
+    enabled: Boolean(r.enabled),
+  }));
+
+  return NextResponse.json({ ok: true, entities, adminRecipients });
 }
