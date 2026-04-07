@@ -1,8 +1,8 @@
 import { readFile } from "fs/promises";
 import {
-  DIGEST_SOLO_TEST_EMAIL,
   getEntities,
-  getDigestRecipientEmails,
+  getEntityRecipientEmails,
+  getAdminRecipientEmails,
 } from "@/lib/config";
 import {
   RELEVANCE_DISCARD_BELOW,
@@ -11,7 +11,13 @@ import {
 import { matchArticleToEntities } from "@/lib/engine/keywords";
 import { summariseArticle } from "@/lib/engine/summariser";
 import { renderDigestHtml, scoreToRelevanceBand } from "@/lib/email/template";
-import type { DigestArticleRow, DigestSection } from "@/lib/email/template";
+import { renderAdminDigestHtml } from "@/lib/email/template";
+import type {
+  DigestArticleRow,
+  DigestSection,
+  AdminDigestSection,
+  AdminDigestArticleRow,
+} from "@/lib/email/template";
 import { sendDigestEmail } from "@/lib/email/sender";
 import { ARTICLES_JSON_PATH } from "@/lib/ingest/all";
 import type { Article, Entity } from "@/lib/types";
@@ -33,6 +39,7 @@ export type ScoredDigestEntry = {
   relevanceScore: number;
   relevanceReason: string;
   summary: string;
+  matchedKeywords: string[];
 };
 
 const SOURCE_LABELS: Record<Article["source"], string> = {
@@ -66,9 +73,6 @@ export function recipientSubscribedToEntity(
   entityId: string,
   entities: Entity[]
 ): boolean {
-  if (entityId === "global") {
-    return true;
-  }
   const ent = entityById(entities, entityId);
   return ent?.recipients.includes(email) ?? false;
 }
@@ -83,22 +87,7 @@ export function filterEntriesForRecipient(
   );
 }
 
-/**
- * Solo-test recipient is not on entity recipient lists; do not apply subscription filtering.
- * Preview and send must use the same entry set (all scored rows across entities).
- */
-function digestEntriesForEmail(
-  soloTest: boolean,
-  recipientEmail: string,
-  scoredEntries: ScoredDigestEntry[],
-  entities: Entity[]
-): ScoredDigestEntry[] {
-  if (soloTest) {
-    return scoredEntries;
-  }
-  return filterEntriesForRecipient(recipientEmail, scoredEntries, entities);
-}
-
+/** Build entity-filtered digest sections (for entity recipients via cron). */
 export function buildSectionsForRecipient(
   entries: ScoredDigestEntry[],
   entities: Entity[]
@@ -124,6 +113,41 @@ export function buildSectionsForRecipient(
       relevanceBand: scoreToRelevanceBand(row.relevanceScore),
       relevanceScore: row.relevanceScore,
       summary: row.summary.trim() || "—",
+    }));
+
+    sections.push({ entityName: ent.name, articles });
+  }
+
+  return sections;
+}
+
+/** Build aggregated admin digest sections with matched keywords (all entities, all entries). */
+export function buildAdminSections(
+  entries: ScoredDigestEntry[],
+  entities: Entity[]
+): AdminDigestSection[] {
+  const byEntity = new Map<string, ScoredDigestEntry[]>();
+  for (const e of entries) {
+    if (!byEntity.has(e.entityId)) byEntity.set(e.entityId, []);
+    byEntity.get(e.entityId)!.push(e);
+  }
+
+  const sections: AdminDigestSection[] = [];
+  for (const ent of entities) {
+    const list = byEntity.get(ent.id);
+    if (!list || list.length === 0) continue;
+
+    list.sort((a, b) => b.relevanceScore - a.relevanceScore);
+
+    const articles: AdminDigestArticleRow[] = list.map((row) => ({
+      title: row.article.title,
+      url: row.article.url,
+      sourceLabel: SOURCE_LABELS[row.article.source],
+      paywalled: row.article.paywalled,
+      relevanceBand: scoreToRelevanceBand(row.relevanceScore),
+      relevanceScore: row.relevanceScore,
+      summary: row.summary.trim() || "—",
+      matchedKeywords: row.matchedKeywords,
     }));
 
     sections.push({ entityName: ent.name, articles });
@@ -180,6 +204,7 @@ export async function buildScoredDigestEntries(
         relevanceScore: score,
         relevanceReason: reason,
         summary: summary.trim(),
+        matchedKeywords: m.matchedKeywords,
       });
     }
   }
@@ -199,16 +224,22 @@ export type DigestRunResult = {
   ok: boolean;
   stats: DigestRunStats;
   dryRun: boolean;
-  soloTest?: boolean;
+  adminOnly?: boolean;
   previewHtml?: string;
   previewRecipient?: string;
   error?: string;
 };
 
+/**
+ * Run the digest pipeline.
+ *
+ * `adminOnly: true`  — Dashboard mode: preview/send the aggregated admin digest
+ *                       to enabled admin recipients only (entity_id IS NULL).
+ * `adminOnly: false` — Cron mode: send per-entity filtered digests to entity recipients.
+ */
 export async function runDigestPipeline(options: {
   dryRun: boolean;
-  /** One email to `DIGEST_SOLO_TEST_EMAIL` with full digest (all scored entries). */
-  soloTest?: boolean;
+  adminOnly?: boolean;
 }): Promise<DigestRunResult> {
   let articles: Article[];
   try {
@@ -218,7 +249,7 @@ export async function runDigestPipeline(options: {
     return {
       ok: false,
       dryRun: options.dryRun,
-      soloTest: options.soloTest === true,
+      adminOnly: options.adminOnly === true,
       error: `Could not load articles: ${message}`,
       stats: {
         articlesProcessed: 0,
@@ -238,25 +269,69 @@ export async function runDigestPipeline(options: {
 
   const digestEntriesAfterScoring = scoredEntries.length;
 
-  const soloTest = options.soloTest === true;
-  const recipients = soloTest
-    ? [DIGEST_SOLO_TEST_EMAIL]
-    : await getDigestRecipientEmails();
+  const adminOnly = options.adminOnly === true;
+
+  if (adminOnly) {
+    const adminEmails = await getAdminRecipientEmails();
+    const recipientsTargeted = adminEmails.length;
+
+    if (adminEmails.length === 0) {
+      console.warn("[digest] No admin recipients configured.");
+      return {
+        ok: true,
+        dryRun: options.dryRun,
+        adminOnly: true,
+        stats: { articlesProcessed, keywordMatchPairs, digestEntriesAfterScoring, emailsSent: 0, recipientsTargeted: 0 },
+      };
+    }
+
+    const adminSections = buildAdminSections(scoredEntries, entities);
+    const adminHtml = renderAdminDigestHtml(adminSections);
+
+    if (options.dryRun) {
+      console.log(
+        `[digest] dry_run admin: articles=${articlesProcessed}, keywordPairs=${keywordMatchPairs}, scoredEntries=${digestEntriesAfterScoring}, previewRecipient=${adminEmails[0]}`
+      );
+      return {
+        ok: true,
+        dryRun: true,
+        adminOnly: true,
+        previewHtml: adminHtml,
+        previewRecipient: adminEmails[0],
+        stats: { articlesProcessed, keywordMatchPairs, digestEntriesAfterScoring, emailsSent: 0, recipientsTargeted },
+      };
+    }
+
+    const subject = digestEmailSubject();
+    let emailsSent = 0;
+    for (const email of adminEmails) {
+      const result = await sendDigestEmail({ to: email, subject, html: adminHtml });
+      if (result.ok) emailsSent++;
+    }
+
+    console.log(
+      `[digest] Sent admin: articles=${articlesProcessed}, scoredEntries=${digestEntriesAfterScoring}, emailsSent=${emailsSent}/${adminEmails.length}`
+    );
+
+    return {
+      ok: true,
+      dryRun: false,
+      adminOnly: true,
+      stats: { articlesProcessed, keywordMatchPairs, digestEntriesAfterScoring, emailsSent, recipientsTargeted },
+    };
+  }
+
+  /* ── Cron mode: per-entity filtered digests to entity recipients ── */
+
+  const recipients = await getEntityRecipientEmails();
   const recipientsTargeted = recipients.length;
 
   if (recipients.length === 0) {
-    console.warn("[digest] No recipients configured on non-global entities.");
+    console.warn("[digest] No entity recipients configured.");
     return {
       ok: true,
       dryRun: options.dryRun,
-      soloTest,
-      stats: {
-        articlesProcessed,
-        keywordMatchPairs,
-        digestEntriesAfterScoring,
-        emailsSent: 0,
-        recipientsTargeted: 0,
-      },
+      stats: { articlesProcessed, keywordMatchPairs, digestEntriesAfterScoring, emailsSent: 0, recipientsTargeted: 0 },
     };
   }
 
@@ -264,72 +339,39 @@ export async function runDigestPipeline(options: {
 
   if (options.dryRun) {
     const previewRecipient = recipients[0];
-    const filtered = digestEntriesForEmail(
-      soloTest,
-      previewRecipient,
-      scoredEntries,
-      entities
-    );
+    const filtered = filterEntriesForRecipient(previewRecipient, scoredEntries, entities);
     const sections = buildSectionsForRecipient(filtered, entities);
     const previewHtml = renderDigestHtml(sections);
 
     console.log(
-      `[digest] dry_run${soloTest ? " solo_test" : ""}: articles=${articlesProcessed}, keywordPairs=${keywordMatchPairs}, scoredEntries=${digestEntriesAfterScoring}, previewRecipient=${previewRecipient}`
+      `[digest] dry_run: articles=${articlesProcessed}, keywordPairs=${keywordMatchPairs}, scoredEntries=${digestEntriesAfterScoring}, previewRecipient=${previewRecipient}`
     );
 
     return {
       ok: true,
       dryRun: true,
-      soloTest,
       previewHtml,
       previewRecipient,
-      stats: {
-        articlesProcessed,
-        keywordMatchPairs,
-        digestEntriesAfterScoring,
-        emailsSent: 0,
-        recipientsTargeted,
-      },
+      stats: { articlesProcessed, keywordMatchPairs, digestEntriesAfterScoring, emailsSent: 0, recipientsTargeted },
     };
   }
 
   let emailsSent = 0;
-
-  if (soloTest) {
-    const filtered = digestEntriesForEmail(true, recipients[0], scoredEntries, entities);
+  for (const email of recipients) {
+    const filtered = filterEntriesForRecipient(email, scoredEntries, entities);
     const sections = buildSectionsForRecipient(filtered, entities);
     const html = renderDigestHtml(sections);
-    const result = await sendDigestEmail({
-      to: recipients[0],
-      subject,
-      html,
-    });
-    if (result.ok) emailsSent = 1;
-  } else {
-    for (const email of recipients) {
-      const filtered = digestEntriesForEmail(false, email, scoredEntries, entities);
-      const sections = buildSectionsForRecipient(filtered, entities);
-      const html = renderDigestHtml(sections);
-
-      const result = await sendDigestEmail({ to: email, subject, html });
-      if (result.ok) emailsSent++;
-    }
+    const result = await sendDigestEmail({ to: email, subject, html });
+    if (result.ok) emailsSent++;
   }
 
   console.log(
-    `[digest] Sent${soloTest ? " solo_test" : ""}: articles=${articlesProcessed}, keywordPairs=${keywordMatchPairs}, scoredEntries=${digestEntriesAfterScoring}, emailsSent=${emailsSent}/${recipients.length}`
+    `[digest] Sent: articles=${articlesProcessed}, keywordPairs=${keywordMatchPairs}, scoredEntries=${digestEntriesAfterScoring}, emailsSent=${emailsSent}/${recipients.length}`
   );
 
   return {
     ok: true,
     dryRun: false,
-    soloTest,
-    stats: {
-      articlesProcessed,
-      keywordMatchPairs,
-      digestEntriesAfterScoring,
-      emailsSent,
-      recipientsTargeted,
-    },
+    stats: { articlesProcessed, keywordMatchPairs, digestEntriesAfterScoring, emailsSent, recipientsTargeted },
   };
 }

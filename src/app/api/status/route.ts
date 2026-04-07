@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { DIGEST_SOLO_TEST_EMAIL, getDigestRecipientEmails } from "@/lib/config";
+import { getEntityRecipientEmails, getAdminRecipientEmails } from "@/lib/config";
 import {
   filterErrorsLast24h,
   readPipelineStatus,
@@ -15,8 +15,10 @@ export async function GET() {
   try {
     const raw = await readPipelineStatus();
     const errors = filterErrorsLast24h(raw.errors);
-    const recipientEmails = await getDigestRecipientEmails();
-    const configuredRecipientCount = recipientEmails.length;
+    const [entityEmails, adminEmails] = await Promise.all([
+      getEntityRecipientEmails(),
+      getAdminRecipientEmails(),
+    ]);
 
     return NextResponse.json({
       ok: true,
@@ -25,8 +27,8 @@ export async function GET() {
       lastDigestAt: raw.lastDigest?.at ?? null,
       digestRecipientCount: raw.lastDigest?.recipientCount ?? null,
       digestEmailsSent: raw.lastDigest?.emailsSent ?? null,
-      configuredRecipientCount,
-      soloTestRecipientEmail: DIGEST_SOLO_TEST_EMAIL,
+      configuredRecipientCount: entityEmails.length,
+      adminRecipientCount: adminEmails.length,
       recentErrors: errors,
     });
   } catch (err) {
@@ -41,7 +43,7 @@ export async function GET() {
         digestRecipientCount: null,
         digestEmailsSent: null,
         configuredRecipientCount: null,
-        soloTestRecipientEmail: null,
+        adminRecipientCount: null,
         recentErrors: [],
       },
       { status: 500 }

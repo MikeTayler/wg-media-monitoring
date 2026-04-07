@@ -6,7 +6,7 @@ export const dynamic = "force-dynamic";
 
 type EntityRow = { id: number; name: string; enabled: boolean; created_at: string };
 type KeywordRow = { id: number; entity_id: number; keyword: string };
-type RecipientRow = { id: number; entity_id: number; email: string; enabled: boolean };
+type RecipientRow = { id: number; entity_id: number | null; email: string; enabled: boolean };
 
 export async function GET(request: Request) {
   if (!authorizeCron(request)) {
@@ -17,7 +17,8 @@ export async function GET(request: Request) {
 
   const entities = (await sql`SELECT id, name, enabled, created_at FROM entities ORDER BY id`) as EntityRow[];
   const keywords = (await sql`SELECT id, entity_id, keyword FROM keywords ORDER BY entity_id, id`) as KeywordRow[];
-  const recipients = (await sql`SELECT id, entity_id, email, enabled FROM recipients ORDER BY entity_id, id`) as RecipientRow[];
+  const recipients = (await sql`SELECT id, entity_id, email, enabled FROM recipients WHERE entity_id IS NOT NULL ORDER BY entity_id, id`) as RecipientRow[];
+  const adminRecipients = (await sql`SELECT id, entity_id, email, enabled FROM recipients WHERE entity_id IS NULL ORDER BY id`) as RecipientRow[];
 
   const kwMap = new Map<number, KeywordRow[]>();
   for (const kw of keywords) {
@@ -27,6 +28,7 @@ export async function GET(request: Request) {
 
   const rcMap = new Map<number, RecipientRow[]>();
   for (const rc of recipients) {
+    if (rc.entity_id == null) continue;
     if (!rcMap.has(rc.entity_id)) rcMap.set(rc.entity_id, []);
     rcMap.get(rc.entity_id)!.push(rc);
   }
@@ -37,5 +39,9 @@ export async function GET(request: Request) {
     recipients: rcMap.get(e.id) ?? [],
   }));
 
-  return NextResponse.json({ ok: true, entities: result });
+  return NextResponse.json({
+    ok: true,
+    entities: result,
+    adminRecipients: adminRecipients.map((r) => ({ id: r.id, email: r.email, enabled: r.enabled })),
+  });
 }

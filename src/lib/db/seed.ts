@@ -62,6 +62,24 @@ async function main() {
   }
   console.log("[seed] Tables OK.");
 
+  /* ── Migrate: make entity_id nullable if it isn't already ── */
+  console.log("[seed] Ensuring recipients.entity_id is nullable…");
+  await sql.query(
+    "ALTER TABLE recipients ALTER COLUMN entity_id DROP NOT NULL"
+  );
+
+  /* ── Migrate: replace old UNIQUE(entity_id, email) with COALESCE-based index ── */
+  console.log("[seed] Ensuring unique index on recipients…");
+  await sql.query(
+    "ALTER TABLE recipients DROP CONSTRAINT IF EXISTS recipients_entity_id_email_key"
+  );
+  await sql.query(
+    "DROP INDEX IF EXISTS recipients_entity_id_email_key"
+  );
+  await sql.query(
+    "CREATE UNIQUE INDEX IF NOT EXISTS recipients_entity_email_uniq ON recipients (COALESCE(entity_id, 0), email)"
+  );
+
   console.log("[seed] Seeding entities…");
   for (const name of ENTITIES) {
     await sql`

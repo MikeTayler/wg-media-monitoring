@@ -3,7 +3,6 @@
 import { useCallback, useEffect, useState, type CSSProperties } from "react";
 
 const CRON_SECRET_SESSION_KEY = "wg-media-monitor-cron-secret";
-const SOLO_TEST_SESSION_KEY = "wg-media-monitor-solo-test";
 
 /* ------------------------------------------------------------------ */
 /*  Type definitions for API payloads                                  */
@@ -17,7 +16,7 @@ type StatusPayload = {
   digestRecipientCount: number | null;
   digestEmailsSent: number | null;
   configuredRecipientCount: number | null;
-  soloTestRecipientEmail: string | null;
+  adminRecipientCount: number | null;
   recentErrors: Array<{ at: string; source: string; message: string }>;
   error?: string;
 };
@@ -33,7 +32,7 @@ type IngestPayload = {
 type DigestPayload = {
   ok?: boolean;
   dryRun?: boolean;
-  soloTest?: boolean;
+  adminOnly?: boolean;
   previewHtml?: string;
   previewRecipient?: string;
   stats?: {
@@ -153,8 +152,84 @@ const sectionHeaderBtn: CSSProperties = {
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
+const ADMIN_KEY = "__admin__";
+
 function authParams(secret: string) {
   return new URLSearchParams({ secret: secret.trim() });
+}
+
+/* ------------------------------------------------------------------ */
+/*  Recipient row component (shared between admin and entity groups)   */
+/* ------------------------------------------------------------------ */
+
+function RecipientRow({
+  rc,
+  onToggle,
+  onDelete,
+}: {
+  rc: DbRecipient;
+  onToggle: (id: number, enabled: boolean) => void;
+  onDelete: (id: number) => void;
+}) {
+  return (
+    <div
+      style={{
+        display: "flex",
+        alignItems: "center",
+        gap: 8,
+        fontSize: 13,
+        padding: "4px 0",
+        opacity: rc.enabled ? 1 : 0.55,
+      }}
+    >
+      <button
+        type="button"
+        role="switch"
+        aria-checked={rc.enabled}
+        title={rc.enabled ? "Disable" : "Enable"}
+        onClick={() => onToggle(rc.id, !rc.enabled)}
+        style={{
+          width: 34,
+          height: 18,
+          borderRadius: 9,
+          border: "none",
+          background: rc.enabled ? "#22c55e" : "#d1d5db",
+          position: "relative",
+          cursor: "pointer",
+          transition: "background 0.2s",
+          flexShrink: 0,
+        }}
+      >
+        <span
+          style={{
+            position: "absolute",
+            top: 1.5,
+            left: rc.enabled ? 17 : 1.5,
+            width: 15,
+            height: 15,
+            borderRadius: "50%",
+            background: "#fff",
+            boxShadow: "0 1px 2px rgba(0,0,0,0.2)",
+            transition: "left 0.2s",
+          }}
+        />
+      </button>
+      <span
+        style={{
+          fontFamily: "ui-monospace, monospace",
+          flex: 1,
+          minWidth: 0,
+          overflow: "hidden",
+          textOverflow: "ellipsis",
+        }}
+      >
+        {rc.email}
+      </span>
+      <button type="button" onClick={() => onDelete(rc.id)} style={btnDanger}>
+        Delete
+      </button>
+    </div>
+  );
 }
 
 /* ------------------------------------------------------------------ */
@@ -181,7 +256,6 @@ export default function AdminDashboardPage() {
   const [previewError, setPreviewError] = useState<string | null>(null);
   const [sendLoading, setSendLoading] = useState(false);
   const [sendResult, setSendResult] = useState<DigestPayload | null>(null);
-  const [soloTestOnly, setSoloTestOnly] = useState(false);
 
   /* --- Cron settings --- */
   const [settings, setSettings] = useState<SettingsMap | null>(null);
@@ -195,15 +269,16 @@ export default function AdminDashboardPage() {
 
   /* --- Entities (keywords + recipients) --- */
   const [entities, setEntities] = useState<DbEntity[] | null>(null);
+  const [adminRecipients, setAdminRecipients] = useState<DbRecipient[]>([]);
   const [entitiesLoading, setEntitiesLoading] = useState(false);
   const [entitiesError, setEntitiesError] = useState<string | null>(null);
   const [kwExpanded, setKwExpanded] = useState<Record<number, boolean>>({});
   const [kwNewInput, setKwNewInput] = useState<Record<number, string>>({});
   const [kwBusy, setKwBusy] = useState<number | null>(null);
-  const [rcExpanded, setRcExpanded] = useState<Record<number, boolean>>({});
-  const [rcNewInput, setRcNewInput] = useState<Record<number, string>>({});
-  const [rcBusy, setRcBusy] = useState<number | null>(null);
-  const [rcEmailError, setRcEmailError] = useState<Record<number, string>>({});
+  const [rcExpanded, setRcExpanded] = useState<Record<string, boolean>>({});
+  const [rcNewInput, setRcNewInput] = useState<Record<string, string>>({});
+  const [rcBusy, setRcBusy] = useState<string | null>(null);
+  const [rcEmailError, setRcEmailError] = useState<Record<string, string>>({});
 
   /* ---------------------------------------------------------------- */
   /*  Initialise from sessionStorage                                   */
@@ -213,8 +288,6 @@ export default function AdminDashboardPage() {
     try {
       const saved = sessionStorage.getItem(CRON_SECRET_SESSION_KEY);
       if (saved) setCronSecret(saved);
-      const solo = sessionStorage.getItem(SOLO_TEST_SESSION_KEY);
-      if (solo === "1") setSoloTestOnly(true);
     } catch {
       /* unavailable */
     }
@@ -224,16 +297,6 @@ export default function AdminDashboardPage() {
     setCronSecret(value);
     try {
       sessionStorage.setItem(CRON_SECRET_SESSION_KEY, value);
-    } catch {
-      /* ignore */
-    }
-  }, []);
-
-  const persistSoloTest = useCallback((checked: boolean) => {
-    setSoloTestOnly(checked);
-    try {
-      if (checked) sessionStorage.setItem(SOLO_TEST_SESSION_KEY, "1");
-      else sessionStorage.removeItem(SOLO_TEST_SESSION_KEY);
     } catch {
       /* ignore */
     }
@@ -328,12 +391,18 @@ export default function AdminDashboardPage() {
     setEntitiesError(null);
     try {
       const res = await fetch(`/api/entities?${authParams(cronSecret)}`, { cache: "no-store" });
-      const data = (await res.json()) as { ok: boolean; entities?: DbEntity[]; error?: string };
+      const data = (await res.json()) as {
+        ok: boolean;
+        entities?: DbEntity[];
+        adminRecipients?: DbRecipient[];
+        error?: string;
+      };
       if (!res.ok || !data.ok) {
         setEntitiesError(data.error ?? `HTTP ${res.status}`);
         return;
       }
       setEntities(data.entities!);
+      setAdminRecipients(data.adminRecipients ?? []);
     } catch (e) {
       setEntitiesError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -370,30 +439,27 @@ export default function AdminDashboardPage() {
   const deleteKeyword = async (kwId: number) => {
     if (!cronSecret.trim()) return;
     try {
-      const res = await fetch(`/api/keywords/${kwId}?${authParams(cronSecret)}`, {
-        method: "DELETE",
-      });
+      const res = await fetch(`/api/keywords/${kwId}?${authParams(cronSecret)}`, { method: "DELETE" });
       const data = (await res.json()) as { ok: boolean; error?: string };
-      if (!res.ok || !data.ok) {
-        setEntitiesError(data.error ?? `HTTP ${res.status}`);
-      }
+      if (!res.ok || !data.ok) setEntitiesError(data.error ?? `HTTP ${res.status}`);
       await loadEntities();
     } catch (e) {
       setEntitiesError(e instanceof Error ? e.message : String(e));
     }
   };
 
-  /* --- Recipient actions --- */
+  /* --- Recipient actions (works for both admin and entity) --- */
 
-  const addRecipient = async (entityId: number) => {
-    const email = (rcNewInput[entityId] ?? "").trim();
+  const addRecipient = async (groupKey: string) => {
+    const email = (rcNewInput[groupKey] ?? "").trim();
     if (!email || !cronSecret.trim()) return;
     if (!EMAIL_RE.test(email)) {
-      setRcEmailError((p) => ({ ...p, [entityId]: "Invalid email format" }));
+      setRcEmailError((p) => ({ ...p, [groupKey]: "Invalid email format" }));
       return;
     }
-    setRcEmailError((p) => ({ ...p, [entityId]: "" }));
-    setRcBusy(entityId);
+    setRcEmailError((p) => ({ ...p, [groupKey]: "" }));
+    setRcBusy(groupKey);
+    const entityId = groupKey === ADMIN_KEY ? null : Number(groupKey);
     try {
       const res = await fetch(`/api/recipients?${authParams(cronSecret)}`, {
         method: "POST",
@@ -404,7 +470,7 @@ export default function AdminDashboardPage() {
       if (!res.ok || !data.ok) {
         setEntitiesError(data.error ?? `HTTP ${res.status}`);
       } else {
-        setRcNewInput((p) => ({ ...p, [entityId]: "" }));
+        setRcNewInput((p) => ({ ...p, [groupKey]: "" }));
         await loadEntities();
       }
     } catch (e) {
@@ -423,9 +489,7 @@ export default function AdminDashboardPage() {
         body: JSON.stringify({ enabled }),
       });
       const data = (await res.json()) as { ok: boolean; error?: string };
-      if (!res.ok || !data.ok) {
-        setEntitiesError(data.error ?? `HTTP ${res.status}`);
-      }
+      if (!res.ok || !data.ok) setEntitiesError(data.error ?? `HTTP ${res.status}`);
       await loadEntities();
     } catch (e) {
       setEntitiesError(e instanceof Error ? e.message : String(e));
@@ -436,13 +500,9 @@ export default function AdminDashboardPage() {
     if (!cronSecret.trim()) return;
     if (!window.confirm("Delete this recipient?")) return;
     try {
-      const res = await fetch(`/api/recipients/${rcId}?${authParams(cronSecret)}`, {
-        method: "DELETE",
-      });
+      const res = await fetch(`/api/recipients/${rcId}?${authParams(cronSecret)}`, { method: "DELETE" });
       const data = (await res.json()) as { ok: boolean; error?: string };
-      if (!res.ok || !data.ok) {
-        setEntitiesError(data.error ?? `HTTP ${res.status}`);
-      }
+      if (!res.ok || !data.ok) setEntitiesError(data.error ?? `HTTP ${res.status}`);
       await loadEntities();
     } catch (e) {
       setEntitiesError(e instanceof Error ? e.message : String(e));
@@ -473,7 +533,7 @@ export default function AdminDashboardPage() {
   };
 
   /* ---------------------------------------------------------------- */
-  /*  Digest                                                           */
+  /*  Digest (admin only — dashboard is a testing tool)                */
   /* ---------------------------------------------------------------- */
 
   const previewDigest = async () => {
@@ -490,7 +550,7 @@ export default function AdminDashboardPage() {
     try {
       const q = authParams(cronSecret);
       q.set("dry_run", "true");
-      if (soloTestOnly) q.set("solo_test", "true");
+      q.set("admin_only", "true");
       const res = await fetch(`/api/digest?${q}`, { method: "GET" });
       const data = (await res.json()) as DigestPayload;
       if (!res.ok || !data.ok) {
@@ -511,18 +571,21 @@ export default function AdminDashboardPage() {
       setSendResult({ error: "Enter CRON_SECRET first." });
       return;
     }
-    const soloEmail = status?.soloTestRecipientEmail;
-    const n = status?.configuredRecipientCount ?? 0;
-    const ok = soloTestOnly
-      ? window.confirm(`Send test digest only to ${soloEmail ?? "the solo-test address"}?`)
-      : window.confirm(`Send digest to ${n} recipient${n === 1 ? "" : "s"}?`);
+    const n = adminRecipients.filter((r) => r.enabled).length;
+    if (n === 0) {
+      setSendResult({ error: "No enabled admin recipients. Add one in the Recipients section." });
+      return;
+    }
+    const ok = window.confirm(
+      `Send aggregated admin digest to ${n} admin recipient${n === 1 ? "" : "s"}?`
+    );
     if (!ok) return;
 
     setSendLoading(true);
     setSendResult(null);
     try {
       const q = authParams(cronSecret);
-      if (soloTestOnly) q.set("solo_test", "true");
+      q.set("admin_only", "true");
       const res = await fetch(`/api/digest?${q}`, { method: "GET" });
       const data = (await res.json()) as DigestPayload;
       setSendResult(data);
@@ -533,6 +596,112 @@ export default function AdminDashboardPage() {
       setSendLoading(false);
     }
   };
+
+  /* ---------------------------------------------------------------- */
+  /*  Recipient group renderer                                         */
+  /* ---------------------------------------------------------------- */
+
+  function renderRecipientGroup(
+    groupKey: string,
+    label: string,
+    recipients: DbRecipient[],
+    subtitle?: string,
+    highlight?: boolean
+  ) {
+    const open = rcExpanded[groupKey] ?? false;
+    const newVal = rcNewInput[groupKey] ?? "";
+    const busy = rcBusy === groupKey;
+    const emailErr = rcEmailError[groupKey];
+    const enabledCount = recipients.filter((r) => r.enabled).length;
+
+    return (
+      <div
+        key={groupKey}
+        style={{
+          border: highlight ? "1.5px solid #a78bfa" : "1px solid var(--border)",
+          borderRadius: 6,
+          marginBottom: 8,
+          overflow: "hidden",
+        }}
+      >
+        <button
+          type="button"
+          onClick={() => setRcExpanded((p) => ({ ...p, [groupKey]: !open }))}
+          style={{
+            ...sectionHeaderBtn,
+            background: highlight
+              ? open ? "#ede9fe" : "#f5f3ff"
+              : open ? "#f3f4f6" : "#fafafa",
+          }}
+        >
+          <span>
+            {open ? "▼" : "▶"} {label}
+            {subtitle && (
+              <span style={{ fontWeight: 400, fontSize: 11, color: "#7c3aed", marginLeft: 6 }}>
+                {subtitle}
+              </span>
+            )}
+            <span style={{ fontWeight: 400, fontSize: 12, color: "var(--muted)", marginLeft: 6 }}>
+              {enabledCount}/{recipients.length} recipient{recipients.length !== 1 ? "s" : ""}
+            </span>
+          </span>
+        </button>
+        {open && (
+          <div style={{ padding: 12, background: "#fff" }}>
+            {recipients.length === 0 && (
+              <p style={{ margin: "0 0 8px", fontSize: 13, color: "var(--muted)" }}>
+                No recipients configured.
+              </p>
+            )}
+            <div style={{ display: "grid", gap: 6, marginBottom: 10 }}>
+              {recipients.map((rc) => (
+                <RecipientRow
+                  key={rc.id}
+                  rc={rc}
+                  onToggle={toggleRecipient}
+                  onDelete={deleteRecipient}
+                />
+              ))}
+            </div>
+            <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
+              <input
+                type="email"
+                value={newVal}
+                placeholder="email@example.com"
+                onChange={(e) => {
+                  setRcNewInput((p) => ({ ...p, [groupKey]: e.target.value }));
+                  if (rcEmailError[groupKey]) setRcEmailError((p) => ({ ...p, [groupKey]: "" }));
+                }}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") {
+                    e.preventDefault();
+                    addRecipient(groupKey);
+                  }
+                }}
+                style={{ ...inputStyle, minWidth: "14rem" }}
+              />
+              <button
+                type="button"
+                disabled={busy || !newVal.trim()}
+                onClick={() => addRecipient(groupKey)}
+                style={{
+                  ...btnPrimary,
+                  opacity: newVal.trim() ? 1 : 0.5,
+                  cursor: newVal.trim() && !busy ? "pointer" : "not-allowed",
+                }}
+              >
+                {busy && <Spinner size={14} />}
+                Add
+              </button>
+            </div>
+            {emailErr && (
+              <p style={{ color: "#b91c1c", fontSize: 12, margin: "4px 0 0" }}>{emailErr}</p>
+            )}
+          </div>
+        )}
+      </div>
+    );
+  }
 
   /* ---------------------------------------------------------------- */
   /*  Render                                                           */
@@ -634,9 +803,14 @@ export default function AdminDashboardPage() {
             </div>
             <div>
               <dt style={{ fontSize: 12, color: "var(--muted)", margin: 0 }}>
-                Configured recipients (current)
+                Recipients
               </dt>
-              <dd style={{ margin: "4px 0 0" }}>{status?.configuredRecipientCount ?? "—"}</dd>
+              <dd style={{ margin: "4px 0 0" }}>
+                {status?.configuredRecipientCount ?? "—"} entity
+                {(status?.configuredRecipientCount ?? 0) !== 1 ? "s" : ""}
+                {", "}
+                {status?.adminRecipientCount ?? "—"} admin
+              </dd>
             </div>
             <div>
               <dt style={{ fontSize: 12, color: "var(--muted)", margin: 0 }}>Recent errors (24h)</dt>
@@ -699,7 +873,6 @@ export default function AdminDashboardPage() {
 
         {settings && (
           <>
-            {/* Enabled toggle */}
             <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 16 }}>
               <button
                 type="button"
@@ -739,7 +912,6 @@ export default function AdminDashboardPage() {
               {settingsSaving === "cron_enabled" && <Spinner size={16} />}
             </div>
 
-            {/* Schedule times */}
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, maxWidth: "24rem", marginBottom: 12 }}>
               <div>
                 <label style={{ display: "block", fontSize: 12, color: "var(--muted)", marginBottom: 4 }}>
@@ -942,129 +1114,20 @@ export default function AdminDashboardPage() {
           </p>
         )}
 
-        {entities?.map((ent) => {
-          const open = rcExpanded[ent.id] ?? false;
-          const newVal = rcNewInput[ent.id] ?? "";
-          const busy = rcBusy === ent.id;
-          const emailErr = rcEmailError[ent.id];
-          const enabledCount = ent.recipients.filter((r) => r.enabled).length;
-          return (
-            <div
-              key={ent.id}
-              style={{ border: "1px solid var(--border)", borderRadius: 6, marginBottom: 8, overflow: "hidden" }}
-            >
-              <button
-                type="button"
-                onClick={() => setRcExpanded((p) => ({ ...p, [ent.id]: !open }))}
-                style={{ ...sectionHeaderBtn, background: open ? "#f3f4f6" : "#fafafa" }}
-              >
-                <span>
-                  {open ? "▼" : "▶"} {ent.name}
-                  <span style={{ fontWeight: 400, fontSize: 12, color: "var(--muted)", marginLeft: 6 }}>
-                    {enabledCount}/{ent.recipients.length} recipient{ent.recipients.length !== 1 ? "s" : ""}
-                  </span>
-                </span>
-              </button>
-              {open && (
-                <div style={{ padding: 12, background: "#fff" }}>
-                  {ent.recipients.length === 0 && (
-                    <p style={{ margin: "0 0 8px", fontSize: 13, color: "var(--muted)" }}>
-                      No recipients configured.
-                    </p>
-                  )}
-                  <div style={{ display: "grid", gap: 6, marginBottom: 10 }}>
-                    {ent.recipients.map((rc) => (
-                      <div
-                        key={rc.id}
-                        style={{
-                          display: "flex",
-                          alignItems: "center",
-                          gap: 8,
-                          fontSize: 13,
-                          padding: "4px 0",
-                          opacity: rc.enabled ? 1 : 0.55,
-                        }}
-                      >
-                        <button
-                          type="button"
-                          role="switch"
-                          aria-checked={rc.enabled}
-                          title={rc.enabled ? "Disable" : "Enable"}
-                          onClick={() => toggleRecipient(rc.id, !rc.enabled)}
-                          style={{
-                            width: 34,
-                            height: 18,
-                            borderRadius: 9,
-                            border: "none",
-                            background: rc.enabled ? "#22c55e" : "#d1d5db",
-                            position: "relative",
-                            cursor: "pointer",
-                            transition: "background 0.2s",
-                            flexShrink: 0,
-                          }}
-                        >
-                          <span
-                            style={{
-                              position: "absolute",
-                              top: 1.5,
-                              left: rc.enabled ? 17 : 1.5,
-                              width: 15,
-                              height: 15,
-                              borderRadius: "50%",
-                              background: "#fff",
-                              boxShadow: "0 1px 2px rgba(0,0,0,0.2)",
-                              transition: "left 0.2s",
-                            }}
-                          />
-                        </button>
-                        <span style={{ fontFamily: "ui-monospace, monospace", flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis" }}>
-                          {rc.email}
-                        </span>
-                        <button type="button" onClick={() => deleteRecipient(rc.id)} style={btnDanger}>
-                          Delete
-                        </button>
-                      </div>
-                    ))}
-                  </div>
-                  <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
-                    <input
-                      type="email"
-                      value={newVal}
-                      placeholder="email@example.com"
-                      onChange={(e) => {
-                        setRcNewInput((p) => ({ ...p, [ent.id]: e.target.value }));
-                        if (rcEmailError[ent.id]) setRcEmailError((p) => ({ ...p, [ent.id]: "" }));
-                      }}
-                      onKeyDown={(e) => {
-                        if (e.key === "Enter") {
-                          e.preventDefault();
-                          addRecipient(ent.id);
-                        }
-                      }}
-                      style={{ ...inputStyle, minWidth: "14rem" }}
-                    />
-                    <button
-                      type="button"
-                      disabled={busy || !newVal.trim()}
-                      onClick={() => addRecipient(ent.id)}
-                      style={{
-                        ...btnPrimary,
-                        opacity: newVal.trim() ? 1 : 0.5,
-                        cursor: newVal.trim() && !busy ? "pointer" : "not-allowed",
-                      }}
-                    >
-                      {busy && <Spinner size={14} />}
-                      Add
-                    </button>
-                  </div>
-                  {emailErr && (
-                    <p style={{ color: "#b91c1c", fontSize: 12, margin: "4px 0 0" }}>{emailErr}</p>
-                  )}
-                </div>
-              )}
-            </div>
-          );
-        })}
+        {entities && (
+          <>
+            {renderRecipientGroup(
+              ADMIN_KEY,
+              "Admin",
+              adminRecipients,
+              "(receives all entities)",
+              true
+            )}
+            {entities.map((ent) =>
+              renderRecipientGroup(String(ent.id), ent.name, ent.recipients)
+            )}
+          </>
+        )}
       </section>
 
       {/* ============================================================ */}
@@ -1101,43 +1164,16 @@ export default function AdminDashboardPage() {
       </section>
 
       {/* ============================================================ */}
-      {/*  DIGEST                                                       */}
+      {/*  DIGEST (admin only)                                          */}
       {/* ============================================================ */}
 
       <section style={panelStyle}>
-        <h2 style={{ fontSize: "1rem", margin: "0 0 0.75rem 0" }}>Digest</h2>
-        <label
-          style={{
-            display: "flex",
-            alignItems: "flex-start",
-            gap: 10,
-            marginBottom: 14,
-            fontSize: 14,
-            cursor: "pointer",
-            maxWidth: "36rem",
-          }}
-        >
-          <input
-            type="checkbox"
-            checked={soloTestOnly}
-            onChange={(e) => persistSoloTest(e.target.checked)}
-            style={{ marginTop: 3, flexShrink: 0 }}
-          />
-          <span>
-            Send digest only to me (testing)
-            {status?.soloTestRecipientEmail ? (
-              <>
-                :{" "}
-                <span style={{ fontFamily: "ui-monospace, monospace", fontSize: 13 }}>
-                  {status.soloTestRecipientEmail}
-                </span>
-              </>
-            ) : null}
-            <span style={{ display: "block", color: "var(--muted)", fontSize: 12, marginTop: 4 }}>
-              Uses the full digest (all entity sections). Uncheck to send to all configured recipients.
-            </span>
-          </span>
-        </label>
+        <h2 style={{ fontSize: "1rem", margin: "0 0 0.5rem 0" }}>Digest</h2>
+        <p style={{ fontSize: 13, color: "var(--muted)", margin: "0 0 12px", maxWidth: "40rem", lineHeight: 1.5 }}>
+          Preview and send the aggregated admin digest (all entities, all scored articles) to
+          enabled <strong>Admin</strong> recipients. Entity recipients receive their filtered
+          digests via the automated cron job.
+        </p>
         <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginBottom: 12 }}>
           <button
             type="button"
@@ -1146,7 +1182,7 @@ export default function AdminDashboardPage() {
             style={{ ...btnSecondary, cursor: previewLoading ? "wait" : "pointer" }}
           >
             {previewLoading && <Spinner />}
-            Preview digest
+            Preview admin digest
           </button>
           <button
             type="button"
@@ -1163,7 +1199,7 @@ export default function AdminDashboardPage() {
             }}
           >
             {sendLoading && <Spinner />}
-            Send digest
+            Send to admin recipients
           </button>
         </div>
         {previewRecipient && (

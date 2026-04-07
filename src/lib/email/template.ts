@@ -136,6 +136,81 @@ function renderSection(section: DigestSection, rowsHtml: string): string {
   ].join("");
 }
 
+/* ------------------------------------------------------------------ */
+/*  Admin (aggregated) digest — includes matched keywords + scores     */
+/* ------------------------------------------------------------------ */
+
+export type AdminDigestArticleRow = DigestArticleRow & {
+  matchedKeywords: string[];
+};
+
+export type AdminDigestSection = {
+  entityName: string;
+  articles: AdminDigestArticleRow[];
+};
+
+function renderAdminArticleRow(row: AdminDigestArticleRow): string {
+  const badge = row.paywalled
+    ? '<span style="display:inline-block;margin-left:6px;padding:2px 6px;font-size:11px;font-weight:600;color:#92400e;background-color:#fef3c7;border-radius:4px;vertical-align:middle;">Paywalled</span>'
+    : "";
+  const bandColor = row.relevanceBand === "High" ? "#166534" : "#854d0e";
+  const bandBg = row.relevanceBand === "High" ? "#dcfce7" : "#fef9c3";
+  const kwText = row.matchedKeywords.length > 0
+    ? `Matched: ${row.matchedKeywords.map(escapeHtml).join(", ")}`
+    : "";
+
+  return [
+    '<table role="presentation" cellpadding="0" cellspacing="0" width="100%" style="margin-bottom:20px;border-bottom:1px solid #f3f4f6;padding-bottom:20px;">',
+    "<tr>",
+    "<td>",
+    `<a href="${escapeAttr(row.url)}" style="color:#1d4ed8;font-size:17px;font-weight:600;line-height:1.35;text-decoration:none;">${escapeHtml(row.title)}</a>`,
+    "</td>",
+    "</tr>",
+    "<tr>",
+    '<td style="padding-top:8px;">',
+    `<span style="font-size:13px;color:#6b7280;">${escapeHtml(row.sourceLabel)}</span>`,
+    badge,
+    `<span style="display:inline-block;margin-left:8px;padding:2px 8px;font-size:12px;font-weight:600;color:${bandColor};background-color:${bandBg};border-radius:999px;">${row.relevanceBand}</span>`,
+    `<span style="font-size:12px;color:#9ca3af;margin-left:6px;">Score: ${row.relevanceScore}</span>`,
+    "</td>",
+    "</tr>",
+    "<tr>",
+    '<td style="padding-top:10px;font-size:15px;line-height:1.55;color:#374151;">',
+    formatSummaryHtml(row.summary),
+    "</td>",
+    "</tr>",
+    kwText
+      ? [
+          "<tr>",
+          '<td style="padding-top:6px;font-size:12px;color:#9ca3af;line-height:1.4;">',
+          kwText,
+          "</td>",
+          "</tr>",
+        ].join("")
+      : "",
+    "</table>",
+  ].join("");
+}
+
+export function renderAdminDigestHtml(sections: AdminDigestSection[]): string {
+  const hasArticles = sections.some((s) => s.articles.length > 0);
+  if (!hasArticles) {
+    return renderEmptyDigestHtml();
+  }
+
+  const parts: string[] = [];
+  for (const section of sections) {
+    if (section.articles.length === 0) continue;
+    const rows = section.articles.map(renderAdminArticleRow).join("");
+    parts.push(renderSection(section, rows));
+  }
+
+  return wrapLayout({
+    title: "Daily digest — Admin",
+    innerHtml: parts.join(""),
+  });
+}
+
 /**
  * Render grouped digest sections. Pass empty sections to get the empty-day message.
  */

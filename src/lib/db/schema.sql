@@ -15,11 +15,10 @@ CREATE TABLE IF NOT EXISTS keywords (
 
 CREATE TABLE IF NOT EXISTS recipients (
   id          serial PRIMARY KEY,
-  entity_id   integer NOT NULL REFERENCES entities(id) ON DELETE CASCADE,
+  entity_id   integer REFERENCES entities(id) ON DELETE CASCADE,
   email       text NOT NULL,
   enabled     boolean NOT NULL DEFAULT true,
-  created_at  timestamptz NOT NULL DEFAULT now(),
-  UNIQUE (entity_id, email)
+  created_at  timestamptz NOT NULL DEFAULT now()
 );
 
 CREATE TABLE IF NOT EXISTS settings (
