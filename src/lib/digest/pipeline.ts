@@ -261,6 +261,23 @@ export async function runDigestPipeline(options: {
     };
   }
 
+  if (articles.length === 0) {
+    console.warn("[digest] No articles found — run ingest first.");
+    return {
+      ok: false,
+      dryRun: options.dryRun,
+      adminOnly: options.adminOnly === true,
+      error: "No articles found. Run ingest first.",
+      stats: {
+        articlesProcessed: 0,
+        keywordMatchPairs: 0,
+        digestEntriesAfterScoring: 0,
+        emailsSent: 0,
+        recipientsTargeted: 0,
+      },
+    };
+  }
+
   const articlesProcessed = articles.length;
   const entities = await getEntities();
 

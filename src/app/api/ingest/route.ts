@@ -4,6 +4,7 @@ import { ingestAll } from "@/lib/ingest/all";
 import { recordIngestSuccess, recordPipelineError } from "@/lib/status/store";
 
 export const dynamic = "force-dynamic";
+export const maxDuration = 300;
 
 /**
  * RSS ingestion entrypoint (Vercel Cron or manual call).

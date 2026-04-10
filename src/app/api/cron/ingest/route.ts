@@ -5,7 +5,7 @@ import { ingestAll } from "@/lib/ingest/all";
 import { recordIngestSuccess, recordPipelineError } from "@/lib/status/store";
 
 export const dynamic = "force-dynamic";
-export const maxDuration = 120;
+export const maxDuration = 300;
 
 /**
  * Cron-triggered article ingestion.

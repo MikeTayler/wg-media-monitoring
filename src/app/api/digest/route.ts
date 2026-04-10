@@ -4,6 +4,7 @@ import { runDigestPipeline } from "@/lib/digest/pipeline";
 import { recordDigestRun, recordPipelineError } from "@/lib/status/store";
 
 export const dynamic = "force-dynamic";
+export const maxDuration = 300;
 
 /**
  * Daily digest: keyword match → AI score → summaries → Mailgun.
