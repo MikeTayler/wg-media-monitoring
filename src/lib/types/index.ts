@@ -12,7 +12,7 @@ export interface Article {
   paywalled: boolean;
 }
 
-/** Wise Group entity (or global bucket) with keywords and digest recipients. */
+/** A Wise Group entity with its keywords, description, and digest recipients. */
 export interface Entity {
   id: string;
   name: string;

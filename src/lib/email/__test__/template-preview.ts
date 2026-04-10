@@ -57,7 +57,7 @@ const sections: DigestSection[] = [
     ],
   },
   {
-    entityName: "Global (all recipients)",
+    entityName: "Wise Group",
     articles: [
       {
         title:

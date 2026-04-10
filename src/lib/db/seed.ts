@@ -71,9 +71,9 @@ const ENTITIES: Array<{ name: string; description: string }> = [
       "The Peoples Project provides wraparound support services for people experiencing homelessness and housing instability in New Zealand.",
   },
   {
-    name: "Global",
+    name: "Wise Group",
     description:
-      "Wise Group is the parent organisation spanning mental health, disability, employment, and social services in New Zealand. This category captures sector-wide policy, funding, and regulatory developments relevant to all entities.",
+      "Wise Group is the parent organisation overseeing Te Pou, Le Va, Pathways, LinkPeople, Just a Thought, and The Peoples Project. It spans mental health, addiction, disability, employment, and social services in Aotearoa New Zealand. CEO: Julie Nelson. Articles relevant to Wise Group include sector-wide government policy, funding announcements, regulatory changes, and cross-cutting developments affecting multiple Wise Group entities.",
   },
 ];
 
@@ -109,6 +109,10 @@ async function main() {
   await sql.query(
     "CREATE UNIQUE INDEX IF NOT EXISTS recipients_entity_email_uniq ON recipients (COALESCE(entity_id, 0), email)"
   );
+
+  /* ── Migrate: rename Global → Wise Group if still present ── */
+  console.log("[seed] Renaming 'Global' entity to 'Wise Group' if needed…");
+  await sql.query("UPDATE entities SET name = 'Wise Group' WHERE name = 'Global'");
 
   /* ── Migrate: add description column if missing ── */
   console.log("[seed] Ensuring entities.description column…");
