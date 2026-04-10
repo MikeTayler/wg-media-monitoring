@@ -1262,7 +1262,7 @@ export default function AdminDashboardPage() {
           <iframe
             title="Digest preview"
             srcDoc={previewHtml}
-            sandbox="allow-same-origin allow-popups allow-popups-to-escape-sandbox"
+            sandbox="allow-same-origin allow-scripts allow-popups allow-popups-to-escape-sandbox"
             style={{
               width: "100%", minHeight: 420,
               border: "1px solid var(--border)", borderRadius: 6, background: "#fff",
