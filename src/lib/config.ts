@@ -18,7 +18,7 @@ import type { Entity } from "@/lib/types";
  */
 export async function getEntities(): Promise<Entity[]> {
   const entityRows = await query(
-    "SELECT id, name, enabled FROM entities WHERE enabled = true ORDER BY id"
+    "SELECT id, name, description, enabled FROM entities WHERE enabled = true ORDER BY id"
   );
 
   const keywordRows = await query(
@@ -47,6 +47,7 @@ export async function getEntities(): Promise<Entity[]> {
     id: String(e.id),
     name: String(e.name),
     aliases: [String(e.name)],
+    description: String(e.description ?? ""),
     keywords: kwMap[String(e.id)] ?? [],
     recipients: rcMap[String(e.id)] ?? [],
   }));

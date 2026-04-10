@@ -190,7 +190,7 @@ export async function buildScoredDigestEntries(
           url: article.url,
           paywalled: article.paywalled,
         },
-        entity: { name: entity.name, keywords: entity.keywords },
+        entity: { name: entity.name, keywords: entity.keywords, description: entity.description ?? "" },
       });
 
       if (score < RELEVANCE_DISCARD_BELOW) continue;

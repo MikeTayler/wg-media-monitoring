@@ -1,6 +1,3 @@
-import FormData from "form-data";
-import Mailgun from "mailgun.js";
-
 export type SendDigestResult = {
   ok: boolean;
   recipient: string;
@@ -11,47 +8,54 @@ export type SendDigestResult = {
 /** US API (default). EU accounts need `MAILGUN_API_URL=https://api.eu.mailgun.net`. */
 const MAILGUN_API_URL_US = "https://api.mailgun.net";
 
-function getMailgunClient() {
-  const key = process.env.MAILGUN_API_KEY;
-  if (!key) {
-    throw new Error("MAILGUN_API_KEY is not set");
-  }
-  const url =
-    process.env.MAILGUN_API_URL?.trim() || MAILGUN_API_URL_US;
-  const mailgun = new Mailgun(FormData);
-  return mailgun.client({ username: "api", key, url });
-}
-
 /**
- * Send one HTML email via Mailgun. Logs success or failure to the console.
+ * Send one HTML email via Mailgun using the native fetch + FormData APIs.
+ * No mailgun.js or form-data dependency — avoids the url.parse() deprecation warning.
  */
 export async function sendDigestEmail(params: {
   to: string;
   subject: string;
   html: string;
 }): Promise<SendDigestResult> {
+  const key = process.env.MAILGUN_API_KEY;
   const domain = process.env.MAILGUN_DOMAIN;
   const from = process.env.MAILGUN_FROM;
-  if (!domain || !from) {
-    const err = "MAILGUN_DOMAIN or MAILGUN_FROM is not set";
+
+  if (!key || !domain || !from) {
+    const err = "MAILGUN_API_KEY, MAILGUN_DOMAIN, or MAILGUN_FROM is not set";
     console.error(`[mailgun] ${err}`);
     return { ok: false, recipient: params.to, error: err };
   }
 
+  const baseUrl = process.env.MAILGUN_API_URL?.trim() || MAILGUN_API_URL_US;
+  const endpoint = `${baseUrl}/v3/${domain}/messages`;
+
+  const body = new FormData();
+  body.append("from", from);
+  body.append("to", params.to);
+  body.append("subject", params.subject);
+  body.append("html", params.html);
+
   try {
-    const mg = getMailgunClient();
-    const res = await mg.messages.create(domain, {
-      from,
-      to: [params.to],
-      subject: params.subject,
-      html: params.html,
+    const res = await fetch(endpoint, {
+      method: "POST",
+      headers: {
+        Authorization: `Basic ${Buffer.from(`api:${key}`).toString("base64")}`,
+      },
+      body,
+      // Bypass Next.js fetch cache — this is a side-effectful POST.
+      cache: "no-store",
     });
 
-    const messageId =
-      typeof res === "object" && res !== null && "id" in res
-        ? String((res as { id?: string }).id)
-        : undefined;
+    const json = (await res.json().catch(() => ({}))) as { id?: string; message?: string };
 
+    if (!res.ok) {
+      const errMsg = json.message ?? `HTTP ${res.status}`;
+      console.error(`[mailgun] Failed to send to ${params.to}: ${errMsg}`);
+      return { ok: false, recipient: params.to, error: errMsg };
+    }
+
+    const messageId = json.id;
     console.log(
       `[mailgun] Sent digest to ${params.to}${messageId ? ` (id: ${messageId})` : ""}`
     );

@@ -38,14 +38,43 @@ const sql = neon(DATABASE_URL);
 const schemaPath = resolve(__dirname, "schema.sql");
 const schemaSql = readFileSync(schemaPath, "utf8");
 
-/* ── Entities to seed ── */
-const ENTITIES = [
-  "Le Va",
-  "Pathways",
-  "LinkPeople",
-  "Te Pou",
-  "Just a thought",
-  "The Peoples Project",
+/* ── Entities to seed (name → description) ── */
+const ENTITIES: Array<{ name: string; description: string }> = [
+  {
+    name: "Le Va",
+    description:
+      "Le Va is a national organisation promoting Pacific peoples' wellbeing, with a focus on suicide prevention, mental health promotion, and Pasifika community resilience.",
+  },
+  {
+    name: "Pathways",
+    description:
+      "Pathways provides mental health, addiction, and disability support services across New Zealand communities.",
+  },
+  {
+    name: "LinkPeople",
+    description:
+      "LinkPeople delivers employment and vocational services for people with disabilities, mental health conditions, and other barriers to employment.",
+  },
+  {
+    name: "Te Pou",
+    description:
+      "Te Pou is a national centre of evidence-based workforce development for the mental health, addiction, and disability sectors in New Zealand.",
+  },
+  {
+    name: "Just a thought",
+    description:
+      "Just a thought (justathought.co.nz) is a free online therapy programme offering iCBT (internet cognitive behavioural therapy) for common mental health conditions.",
+  },
+  {
+    name: "The Peoples Project",
+    description:
+      "The Peoples Project provides wraparound support services for people experiencing homelessness and housing instability in New Zealand.",
+  },
+  {
+    name: "Global",
+    description:
+      "Wise Group is the parent organisation spanning mental health, disability, employment, and social services in New Zealand. This category captures sector-wide policy, funding, and regulatory developments relevant to all entities.",
+  },
 ];
 
 /* ── Default settings ── */
@@ -81,12 +110,18 @@ async function main() {
     "CREATE UNIQUE INDEX IF NOT EXISTS recipients_entity_email_uniq ON recipients (COALESCE(entity_id, 0), email)"
   );
 
+  /* ── Migrate: add description column if missing ── */
+  console.log("[seed] Ensuring entities.description column…");
+  await sql.query(
+    "ALTER TABLE entities ADD COLUMN IF NOT EXISTS description text NOT NULL DEFAULT ''"
+  );
+
   console.log("[seed] Seeding entities…");
-  for (const name of ENTITIES) {
+  for (const { name, description } of ENTITIES) {
     await sql`
-      INSERT INTO entities (name)
-      VALUES (${name})
-      ON CONFLICT (name) DO NOTHING
+      INSERT INTO entities (name, description)
+      VALUES (${name}, ${description})
+      ON CONFLICT (name) DO UPDATE SET description = EXCLUDED.description
     `;
   }
   console.log(`[seed] ${ENTITIES.length} entities ensured.`);

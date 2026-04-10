@@ -18,7 +18,7 @@ export type ScoreArticleInput = {
     Article,
     "title" | "body" | "source" | "url" | "paywalled"
   >;
-  entity: Pick<Entity, "name" | "keywords">;
+  entity: Pick<Entity, "name" | "keywords" | "description">;
 };
 
 export type RelevanceScoreResult = {
@@ -48,7 +48,13 @@ export async function scoreArticleRelevance(
 
 You output only valid JSON, no markdown fences.`;
 
-  const userPrompt = `Assess how relevant this news article is to the entity "${entity.name}" when monitoring for these themes: ${entity.keywords.join(", ")}.
+  const entityContext = entity.description
+    ? `Entity: ${entity.name}\nDescription: ${entity.description}\nMonitoring themes: ${entity.keywords.join(", ")}`
+    : `Entity: ${entity.name}\nMonitoring themes: ${entity.keywords.join(", ")}`;
+
+  const userPrompt = `Assess how relevant this news article is to the following entity.
+
+${entityContext}
 
 Article metadata:
 - Source: ${article.source}

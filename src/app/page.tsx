@@ -48,14 +48,20 @@ type DigestPayload = {
 type SettingsMap = Record<string, string>;
 
 type DbKeyword = { id: number; keyword: string };
-type DbRecipient = { id: number; email: string; enabled: boolean };
-type DbEntity = {
+type DbEntityRecipient = { id: number; email: string; enabled: boolean };
+
+/** Full entity config as returned by /api/entity-config */
+type DbEntityConfig = {
   id: number;
   name: string;
+  description: string;
   enabled: boolean;
   keywords: DbKeyword[];
-  recipients: DbRecipient[];
+  recipients: DbEntityRecipient[];
 };
+
+/** Admin recipient as returned by /api/entities */
+type DbAdminRecipient = { id: number; email: string; enabled: boolean };
 
 /* ------------------------------------------------------------------ */
 /*  Shared UI helpers                                                  */
@@ -151,7 +157,6 @@ const sectionHeaderBtn: CSSProperties = {
 };
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-
 const ADMIN_KEY = "__admin__";
 
 function authParams(secret: string) {
@@ -159,15 +164,15 @@ function authParams(secret: string) {
 }
 
 /* ------------------------------------------------------------------ */
-/*  Recipient row component (shared between admin and entity groups)   */
+/*  Admin recipient row (toggle + delete)                              */
 /* ------------------------------------------------------------------ */
 
-function RecipientRow({
+function AdminRecipientRow({
   rc,
   onToggle,
   onDelete,
 }: {
-  rc: DbRecipient;
+  rc: DbAdminRecipient;
   onToggle: (id: number, enabled: boolean) => void;
   onDelete: (id: number) => void;
 }) {
@@ -267,14 +272,29 @@ export default function AdminDashboardPage() {
   const [digestTime, setDigestTime] = useState("06:30");
   const [cronTimezone, setCronTimezone] = useState("Pacific/Auckland");
 
-  /* --- Entities (keywords + recipients) --- */
-  const [entities, setEntities] = useState<DbEntity[] | null>(null);
-  const [adminRecipients, setAdminRecipients] = useState<DbRecipient[]>([]);
-  const [entitiesLoading, setEntitiesLoading] = useState(false);
-  const [entitiesError, setEntitiesError] = useState<string | null>(null);
-  const [kwExpanded, setKwExpanded] = useState<Record<number, boolean>>({});
+  /* --- Entity config (keywords + descriptions + entity recipients) --- */
+  const [entityConfigs, setEntityConfigs] = useState<DbEntityConfig[] | null>(null);
+  const [entityConfigLoading, setEntityConfigLoading] = useState(false);
+  const [entityConfigError, setEntityConfigError] = useState<string | null>(null);
+
+  // Per-entity expanded state
+  const [ecExpanded, setEcExpanded] = useState<Record<number, boolean>>({});
+
+  // Description editing
+  const [descDraft, setDescDraft] = useState<Record<number, string>>({});
+  const [descSaving, setDescSaving] = useState<number | null>(null);
+
+  // Keyword editing
   const [kwNewInput, setKwNewInput] = useState<Record<number, string>>({});
   const [kwBusy, setKwBusy] = useState<number | null>(null);
+
+  // Entity recipient editing
+  const [erNewInput, setErNewInput] = useState<Record<number, string>>({});
+  const [erEmailError, setErEmailError] = useState<Record<number, string>>({});
+  const [erBusy, setErBusy] = useState<number | null>(null);
+
+  /* --- Admin recipients (entity_id IS NULL) --- */
+  const [adminRecipients, setAdminRecipients] = useState<DbAdminRecipient[]>([]);
   const [rcExpanded, setRcExpanded] = useState<Record<string, boolean>>({});
   const [rcNewInput, setRcNewInput] = useState<Record<string, string>>({});
   const [rcBusy, setRcBusy] = useState<string | null>(null);
@@ -288,18 +308,14 @@ export default function AdminDashboardPage() {
     try {
       const saved = sessionStorage.getItem(CRON_SECRET_SESSION_KEY);
       if (saved) setCronSecret(saved);
-    } catch {
-      /* unavailable */
-    }
+    } catch { /* unavailable */ }
   }, []);
 
   const persistSecret = useCallback((value: string) => {
     setCronSecret(value);
     try {
       sessionStorage.setItem(CRON_SECRET_SESSION_KEY, value);
-    } catch {
-      /* ignore */
-    }
+    } catch { /* ignore */ }
   }, []);
 
   /* ---------------------------------------------------------------- */
@@ -322,9 +338,7 @@ export default function AdminDashboardPage() {
     }
   }, []);
 
-  useEffect(() => {
-    loadStatus();
-  }, [loadStatus]);
+  useEffect(() => { loadStatus(); }, [loadStatus]);
 
   /* ---------------------------------------------------------------- */
   /*  Settings (cron control)                                          */
@@ -337,10 +351,7 @@ export default function AdminDashboardPage() {
     try {
       const res = await fetch(`/api/settings?${authParams(cronSecret)}`, { cache: "no-store" });
       const data = (await res.json()) as { ok: boolean; settings?: SettingsMap; error?: string };
-      if (!res.ok || !data.ok) {
-        setSettingsError(data.error ?? `HTTP ${res.status}`);
-        return;
-      }
+      if (!res.ok || !data.ok) { setSettingsError(data.error ?? `HTTP ${res.status}`); return; }
       const s = data.settings!;
       setSettings(s);
       setCronEnabled(s.cron_enabled === "true");
@@ -365,9 +376,7 @@ export default function AdminDashboardPage() {
         body: JSON.stringify({ key, value }),
       });
       const data = (await res.json()) as { ok: boolean; error?: string };
-      if (!res.ok || !data.ok) {
-        setSettingsError(data.error ?? `HTTP ${res.status}`);
-      }
+      if (!res.ok || !data.ok) setSettingsError(data.error ?? `HTTP ${res.status}`);
     } catch (e) {
       setSettingsError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -382,35 +391,73 @@ export default function AdminDashboardPage() {
   };
 
   /* ---------------------------------------------------------------- */
-  /*  Entities (keywords + recipients)                                 */
+  /*  Entity config (keywords + descriptions + entity recipients)      */
   /* ---------------------------------------------------------------- */
 
-  const loadEntities = useCallback(async () => {
+  const loadEntityConfig = useCallback(async () => {
     if (!cronSecret.trim()) return;
-    setEntitiesLoading(true);
-    setEntitiesError(null);
+    setEntityConfigLoading(true);
+    setEntityConfigError(null);
+    try {
+      const res = await fetch(`/api/entity-config?${authParams(cronSecret)}`, { cache: "no-store" });
+      const data = (await res.json()) as {
+        ok: boolean;
+        entities?: DbEntityConfig[];
+        error?: string;
+      };
+      if (!res.ok || !data.ok) { setEntityConfigError(data.error ?? `HTTP ${res.status}`); return; }
+      setEntityConfigs(data.entities!);
+      // Initialise description drafts from loaded data
+      const drafts: Record<number, string> = {};
+      for (const e of data.entities!) drafts[e.id] = e.description;
+      setDescDraft(drafts);
+    } catch (e) {
+      setEntityConfigError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setEntityConfigLoading(false);
+    }
+  }, [cronSecret]);
+
+  /** Load admin recipients from /api/entities */
+  const loadAdminRecipients = useCallback(async () => {
+    if (!cronSecret.trim()) return;
     try {
       const res = await fetch(`/api/entities?${authParams(cronSecret)}`, { cache: "no-store" });
       const data = (await res.json()) as {
         ok: boolean;
-        entities?: DbEntity[];
-        adminRecipients?: DbRecipient[];
+        adminRecipients?: DbAdminRecipient[];
         error?: string;
       };
-      if (!res.ok || !data.ok) {
-        setEntitiesError(data.error ?? `HTTP ${res.status}`);
-        return;
-      }
-      setEntities(data.entities!);
-      setAdminRecipients(data.adminRecipients ?? []);
-    } catch (e) {
-      setEntitiesError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setEntitiesLoading(false);
-    }
+      if (res.ok && data.ok) setAdminRecipients(data.adminRecipients ?? []);
+    } catch { /* ignore */ }
   }, [cronSecret]);
 
-  /* --- Keyword actions --- */
+  /* --- Description --- */
+
+  const saveDescription = async (entityId: number) => {
+    if (!cronSecret.trim()) return;
+    setDescSaving(entityId);
+    setEntityConfigError(null);
+    try {
+      const res = await fetch(`/api/entity-config?${authParams(cronSecret)}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ entityId, field: "description", value: descDraft[entityId] ?? "" }),
+      });
+      const data = (await res.json()) as { ok: boolean; error?: string };
+      if (!res.ok || !data.ok) {
+        setEntityConfigError(data.error ?? `HTTP ${res.status}`);
+      } else {
+        await loadEntityConfig();
+      }
+    } catch (e) {
+      setEntityConfigError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setDescSaving(null);
+    }
+  };
+
+  /* --- Keywords --- */
 
   const addKeyword = async (entityId: number) => {
     const kw = (kwNewInput[entityId] ?? "").trim();
@@ -424,42 +471,42 @@ export default function AdminDashboardPage() {
       });
       const data = (await res.json()) as { ok: boolean; error?: string };
       if (!res.ok || !data.ok) {
-        setEntitiesError(data.error ?? `HTTP ${res.status}`);
+        setEntityConfigError(data.error ?? `HTTP ${res.status}`);
       } else {
         setKwNewInput((p) => ({ ...p, [entityId]: "" }));
-        await loadEntities();
+        await loadEntityConfig();
       }
     } catch (e) {
-      setEntitiesError(e instanceof Error ? e.message : String(e));
+      setEntityConfigError(e instanceof Error ? e.message : String(e));
     } finally {
       setKwBusy(null);
     }
   };
 
-  const deleteKeyword = async (kwId: number) => {
+  const deleteKeyword = async (kwId: number, entityId: number) => {
     if (!cronSecret.trim()) return;
     try {
       const res = await fetch(`/api/keywords/${kwId}?${authParams(cronSecret)}`, { method: "DELETE" });
       const data = (await res.json()) as { ok: boolean; error?: string };
-      if (!res.ok || !data.ok) setEntitiesError(data.error ?? `HTTP ${res.status}`);
-      await loadEntities();
+      if (!res.ok || !data.ok) setEntityConfigError(data.error ?? `HTTP ${res.status}`);
+      await loadEntityConfig();
     } catch (e) {
-      setEntitiesError(e instanceof Error ? e.message : String(e));
+      setEntityConfigError(e instanceof Error ? e.message : String(e));
     }
+    void entityId; // used for context only
   };
 
-  /* --- Recipient actions (works for both admin and entity) --- */
+  /* --- Entity recipients --- */
 
-  const addRecipient = async (groupKey: string) => {
-    const email = (rcNewInput[groupKey] ?? "").trim();
+  const addEntityRecipient = async (entityId: number) => {
+    const email = (erNewInput[entityId] ?? "").trim();
     if (!email || !cronSecret.trim()) return;
     if (!EMAIL_RE.test(email)) {
-      setRcEmailError((p) => ({ ...p, [groupKey]: "Invalid email format" }));
+      setErEmailError((p) => ({ ...p, [entityId]: "Invalid email format" }));
       return;
     }
-    setRcEmailError((p) => ({ ...p, [groupKey]: "" }));
-    setRcBusy(groupKey);
-    const entityId = groupKey === ADMIN_KEY ? null : Number(groupKey);
+    setErEmailError((p) => ({ ...p, [entityId]: "" }));
+    setErBusy(entityId);
     try {
       const res = await fetch(`/api/recipients?${authParams(cronSecret)}`, {
         method: "POST",
@@ -468,19 +515,63 @@ export default function AdminDashboardPage() {
       });
       const data = (await res.json()) as { ok: boolean; error?: string };
       if (!res.ok || !data.ok) {
-        setEntitiesError(data.error ?? `HTTP ${res.status}`);
+        setEntityConfigError(data.error ?? `HTTP ${res.status}`);
       } else {
-        setRcNewInput((p) => ({ ...p, [groupKey]: "" }));
-        await loadEntities();
+        setErNewInput((p) => ({ ...p, [entityId]: "" }));
+        await loadEntityConfig();
       }
     } catch (e) {
-      setEntitiesError(e instanceof Error ? e.message : String(e));
+      setEntityConfigError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setErBusy(null);
+    }
+  };
+
+  const deleteEntityRecipient = async (rcId: number) => {
+    if (!cronSecret.trim()) return;
+    if (!window.confirm("Delete this recipient?")) return;
+    try {
+      const res = await fetch(`/api/recipients/${rcId}?${authParams(cronSecret)}`, { method: "DELETE" });
+      const data = (await res.json()) as { ok: boolean; error?: string };
+      if (!res.ok || !data.ok) setEntityConfigError(data.error ?? `HTTP ${res.status}`);
+      await loadEntityConfig();
+    } catch (e) {
+      setEntityConfigError(e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  /* --- Admin recipients --- */
+
+  const addAdminRecipient = async () => {
+    const email = (rcNewInput[ADMIN_KEY] ?? "").trim();
+    if (!email || !cronSecret.trim()) return;
+    if (!EMAIL_RE.test(email)) {
+      setRcEmailError((p) => ({ ...p, [ADMIN_KEY]: "Invalid email format" }));
+      return;
+    }
+    setRcEmailError((p) => ({ ...p, [ADMIN_KEY]: "" }));
+    setRcBusy(ADMIN_KEY);
+    try {
+      const res = await fetch(`/api/recipients?${authParams(cronSecret)}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ entity_id: null, email }),
+      });
+      const data = (await res.json()) as { ok: boolean; error?: string };
+      if (!res.ok || !data.ok) {
+        setEntityConfigError(data.error ?? `HTTP ${res.status}`);
+      } else {
+        setRcNewInput((p) => ({ ...p, [ADMIN_KEY]: "" }));
+        await loadAdminRecipients();
+      }
+    } catch (e) {
+      setEntityConfigError(e instanceof Error ? e.message : String(e));
     } finally {
       setRcBusy(null);
     }
   };
 
-  const toggleRecipient = async (rcId: number, enabled: boolean) => {
+  const toggleAdminRecipient = async (rcId: number, enabled: boolean) => {
     if (!cronSecret.trim()) return;
     try {
       const res = await fetch(`/api/recipients/${rcId}?${authParams(cronSecret)}`, {
@@ -489,23 +580,23 @@ export default function AdminDashboardPage() {
         body: JSON.stringify({ enabled }),
       });
       const data = (await res.json()) as { ok: boolean; error?: string };
-      if (!res.ok || !data.ok) setEntitiesError(data.error ?? `HTTP ${res.status}`);
-      await loadEntities();
+      if (!res.ok || !data.ok) setEntityConfigError(data.error ?? `HTTP ${res.status}`);
+      await loadAdminRecipients();
     } catch (e) {
-      setEntitiesError(e instanceof Error ? e.message : String(e));
+      setEntityConfigError(e instanceof Error ? e.message : String(e));
     }
   };
 
-  const deleteRecipient = async (rcId: number) => {
+  const deleteAdminRecipient = async (rcId: number) => {
     if (!cronSecret.trim()) return;
-    if (!window.confirm("Delete this recipient?")) return;
+    if (!window.confirm("Delete this admin recipient?")) return;
     try {
       const res = await fetch(`/api/recipients/${rcId}?${authParams(cronSecret)}`, { method: "DELETE" });
       const data = (await res.json()) as { ok: boolean; error?: string };
-      if (!res.ok || !data.ok) setEntitiesError(data.error ?? `HTTP ${res.status}`);
-      await loadEntities();
+      if (!res.ok || !data.ok) setEntityConfigError(data.error ?? `HTTP ${res.status}`);
+      await loadAdminRecipients();
     } catch (e) {
-      setEntitiesError(e instanceof Error ? e.message : String(e));
+      setEntityConfigError(e instanceof Error ? e.message : String(e));
     }
   };
 
@@ -514,10 +605,7 @@ export default function AdminDashboardPage() {
   /* ---------------------------------------------------------------- */
 
   const runIngest = async () => {
-    if (!cronSecret.trim()) {
-      setIngestResult({ error: "Enter CRON_SECRET first." });
-      return;
-    }
+    if (!cronSecret.trim()) { setIngestResult({ error: "Enter CRON_SECRET first." }); return; }
     setIngestLoading(true);
     setIngestResult(null);
     try {
@@ -533,16 +621,11 @@ export default function AdminDashboardPage() {
   };
 
   /* ---------------------------------------------------------------- */
-  /*  Digest (admin only — dashboard is a testing tool)                */
+  /*  Digest                                                           */
   /* ---------------------------------------------------------------- */
 
   const previewDigest = async () => {
-    if (!cronSecret.trim()) {
-      setPreviewError("Enter CRON_SECRET first.");
-      setPreviewHtml(null);
-      setPreviewRecipient(null);
-      return;
-    }
+    if (!cronSecret.trim()) { setPreviewError("Enter CRON_SECRET first."); setPreviewHtml(null); return; }
     setPreviewLoading(true);
     setPreviewError(null);
     setPreviewHtml(null);
@@ -553,10 +636,7 @@ export default function AdminDashboardPage() {
       q.set("admin_only", "true");
       const res = await fetch(`/api/digest?${q}`, { method: "GET" });
       const data = (await res.json()) as DigestPayload;
-      if (!res.ok || !data.ok) {
-        setPreviewError(data.error ?? `HTTP ${res.status}`);
-        return;
-      }
+      if (!res.ok || !data.ok) { setPreviewError(data.error ?? `HTTP ${res.status}`); return; }
       setPreviewHtml(data.previewHtml ?? null);
       setPreviewRecipient(data.previewRecipient ?? null);
     } catch (e) {
@@ -567,20 +647,10 @@ export default function AdminDashboardPage() {
   };
 
   const sendDigest = async () => {
-    if (!cronSecret.trim()) {
-      setSendResult({ error: "Enter CRON_SECRET first." });
-      return;
-    }
+    if (!cronSecret.trim()) { setSendResult({ error: "Enter CRON_SECRET first." }); return; }
     const n = adminRecipients.filter((r) => r.enabled).length;
-    if (n === 0) {
-      setSendResult({ error: "No enabled admin recipients. Add one in the Recipients section." });
-      return;
-    }
-    const ok = window.confirm(
-      `Send aggregated admin digest to ${n} admin recipient${n === 1 ? "" : "s"}?`
-    );
-    if (!ok) return;
-
+    if (n === 0) { setSendResult({ error: "No enabled admin recipients. Add one in the Admin Recipients section." }); return; }
+    if (!window.confirm(`Send aggregated admin digest to ${n} admin recipient${n === 1 ? "" : "s"}?`)) return;
     setSendLoading(true);
     setSendResult(null);
     try {
@@ -598,114 +668,18 @@ export default function AdminDashboardPage() {
   };
 
   /* ---------------------------------------------------------------- */
-  /*  Recipient group renderer                                         */
-  /* ---------------------------------------------------------------- */
-
-  function renderRecipientGroup(
-    groupKey: string,
-    label: string,
-    recipients: DbRecipient[],
-    subtitle?: string,
-    highlight?: boolean
-  ) {
-    const open = rcExpanded[groupKey] ?? false;
-    const newVal = rcNewInput[groupKey] ?? "";
-    const busy = rcBusy === groupKey;
-    const emailErr = rcEmailError[groupKey];
-    const enabledCount = recipients.filter((r) => r.enabled).length;
-
-    return (
-      <div
-        key={groupKey}
-        style={{
-          border: highlight ? "1.5px solid #a78bfa" : "1px solid var(--border)",
-          borderRadius: 6,
-          marginBottom: 8,
-          overflow: "hidden",
-        }}
-      >
-        <button
-          type="button"
-          onClick={() => setRcExpanded((p) => ({ ...p, [groupKey]: !open }))}
-          style={{
-            ...sectionHeaderBtn,
-            background: highlight
-              ? open ? "#ede9fe" : "#f5f3ff"
-              : open ? "#f3f4f6" : "#fafafa",
-          }}
-        >
-          <span>
-            {open ? "▼" : "▶"} {label}
-            {subtitle && (
-              <span style={{ fontWeight: 400, fontSize: 11, color: "#7c3aed", marginLeft: 6 }}>
-                {subtitle}
-              </span>
-            )}
-            <span style={{ fontWeight: 400, fontSize: 12, color: "var(--muted)", marginLeft: 6 }}>
-              {enabledCount}/{recipients.length} recipient{recipients.length !== 1 ? "s" : ""}
-            </span>
-          </span>
-        </button>
-        {open && (
-          <div style={{ padding: 12, background: "#fff" }}>
-            {recipients.length === 0 && (
-              <p style={{ margin: "0 0 8px", fontSize: 13, color: "var(--muted)" }}>
-                No recipients configured.
-              </p>
-            )}
-            <div style={{ display: "grid", gap: 6, marginBottom: 10 }}>
-              {recipients.map((rc) => (
-                <RecipientRow
-                  key={rc.id}
-                  rc={rc}
-                  onToggle={toggleRecipient}
-                  onDelete={deleteRecipient}
-                />
-              ))}
-            </div>
-            <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
-              <input
-                type="email"
-                value={newVal}
-                placeholder="email@example.com"
-                onChange={(e) => {
-                  setRcNewInput((p) => ({ ...p, [groupKey]: e.target.value }));
-                  if (rcEmailError[groupKey]) setRcEmailError((p) => ({ ...p, [groupKey]: "" }));
-                }}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") {
-                    e.preventDefault();
-                    addRecipient(groupKey);
-                  }
-                }}
-                style={{ ...inputStyle, minWidth: "14rem" }}
-              />
-              <button
-                type="button"
-                disabled={busy || !newVal.trim()}
-                onClick={() => addRecipient(groupKey)}
-                style={{
-                  ...btnPrimary,
-                  opacity: newVal.trim() ? 1 : 0.5,
-                  cursor: newVal.trim() && !busy ? "pointer" : "not-allowed",
-                }}
-              >
-                {busy && <Spinner size={14} />}
-                Add
-              </button>
-            </div>
-            {emailErr && (
-              <p style={{ color: "#b91c1c", fontSize: 12, margin: "4px 0 0" }}>{emailErr}</p>
-            )}
-          </div>
-        )}
-      </div>
-    );
-  }
-
-  /* ---------------------------------------------------------------- */
   /*  Render                                                           */
   /* ---------------------------------------------------------------- */
+
+  const chipDeleteBtn: CSSProperties = {
+    background: "none",
+    border: "none",
+    cursor: "pointer",
+    color: "#9ca3af",
+    fontSize: 14,
+    lineHeight: 1,
+    padding: "0 2px",
+  };
 
   return (
     <main style={{ maxWidth: "56rem", margin: "0 auto", padding: "1.5rem 1rem 3rem" }}>
@@ -722,10 +696,7 @@ export default function AdminDashboardPage() {
       {/* ============================================================ */}
 
       <section style={panelStyle}>
-        <label
-          htmlFor="cron-secret"
-          style={{ display: "block", fontSize: 13, fontWeight: 600, marginBottom: 6 }}
-        >
+        <label htmlFor="cron-secret" style={{ display: "block", fontSize: 13, fontWeight: 600, marginBottom: 6 }}>
           CRON_SECRET
         </label>
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
@@ -740,18 +711,15 @@ export default function AdminDashboardPage() {
           />
           <button
             type="button"
-            disabled={!cronSecret.trim() || settingsLoading || entitiesLoading}
-            onClick={() => {
-              loadSettings();
-              loadEntities();
-            }}
+            disabled={!cronSecret.trim() || settingsLoading || entityConfigLoading}
+            onClick={() => { loadSettings(); loadEntityConfig(); loadAdminRecipients(); }}
             style={{
               ...btnPrimary,
               opacity: cronSecret.trim() ? 1 : 0.5,
               cursor: cronSecret.trim() ? "pointer" : "not-allowed",
             }}
           >
-            {(settingsLoading || entitiesLoading) && <Spinner />}
+            {(settingsLoading || entityConfigLoading) && <Spinner />}
             Load config
           </button>
         </div>
@@ -778,33 +746,22 @@ export default function AdminDashboardPage() {
             ].map(([label, val, mono]) => (
               <div key={label as string}>
                 <dt style={{ fontSize: 12, color: "var(--muted)", margin: 0 }}>{label as string}</dt>
-                <dd
-                  style={{
-                    margin: "4px 0 0",
-                    ...(mono ? { fontFamily: "ui-monospace, monospace" } : {}),
-                  }}
-                >
+                <dd style={{ margin: "4px 0 0", ...(mono ? { fontFamily: "ui-monospace, monospace" } : {}) }}>
                   {(val as string | number) ?? "—"}
                 </dd>
               </div>
             ))}
             <div>
-              <dt style={{ fontSize: 12, color: "var(--muted)", margin: 0 }}>
-                Emails sent (last digest)
-              </dt>
+              <dt style={{ fontSize: 12, color: "var(--muted)", margin: 0 }}>Emails sent (last digest)</dt>
               <dd style={{ margin: "4px 0 0" }}>
                 {status?.digestEmailsSent ?? "—"}
                 {status?.digestRecipientCount != null && (
-                  <span style={{ color: "var(--muted)" }}>
-                    {" "}/ {status.digestRecipientCount} targeted
-                  </span>
+                  <span style={{ color: "var(--muted)" }}> / {status.digestRecipientCount} targeted</span>
                 )}
               </dd>
             </div>
             <div>
-              <dt style={{ fontSize: 12, color: "var(--muted)", margin: 0 }}>
-                Recipients
-              </dt>
+              <dt style={{ fontSize: 12, color: "var(--muted)", margin: 0 }}>Recipients</dt>
               <dd style={{ margin: "4px 0 0" }}>
                 {status?.configuredRecipientCount ?? "—"} entity
                 {(status?.configuredRecipientCount ?? 0) !== 1 ? "s" : ""}
@@ -835,7 +792,7 @@ export default function AdminDashboardPage() {
           <button type="button" onClick={() => loadStatus()} style={btnSecondary}>
             Refresh status
           </button>
-          {cronSecret.trim() ? (
+          {cronSecret.trim() && (
             <a
               href={`/api/articles?secret=${encodeURIComponent(cronSecret.trim())}`}
               target="_blank"
@@ -844,7 +801,7 @@ export default function AdminDashboardPage() {
             >
               View raw articles
             </a>
-          ) : null}
+          )}
         </div>
       </section>
 
@@ -860,16 +817,8 @@ export default function AdminDashboardPage() {
             Click &ldquo;Load config&rdquo; above to view cron settings.
           </p>
         )}
-
-        {settingsLoading && (
-          <p style={{ margin: 0, color: "var(--muted)" }}>
-            <Spinner /> Loading settings…
-          </p>
-        )}
-
-        {settingsError && (
-          <p style={{ color: "#b91c1c", fontSize: 13, margin: "0 0 8px" }}>{settingsError}</p>
-        )}
+        {settingsLoading && <p style={{ margin: 0, color: "var(--muted)" }}><Spinner /> Loading settings…</p>}
+        {settingsError && <p style={{ color: "#b91c1c", fontSize: 13, margin: "0 0 8px" }}>{settingsError}</p>}
 
         {settings && (
           <>
@@ -881,30 +830,18 @@ export default function AdminDashboardPage() {
                 onClick={toggleCronEnabled}
                 disabled={settingsSaving === "cron_enabled"}
                 style={{
-                  width: 44,
-                  height: 24,
-                  borderRadius: 12,
-                  border: "none",
+                  width: 44, height: 24, borderRadius: 12, border: "none",
                   background: cronEnabled ? "#22c55e" : "#d1d5db",
                   position: "relative",
                   cursor: settingsSaving === "cron_enabled" ? "wait" : "pointer",
-                  transition: "background 0.2s",
-                  flexShrink: 0,
+                  transition: "background 0.2s", flexShrink: 0,
                 }}
               >
-                <span
-                  style={{
-                    position: "absolute",
-                    top: 2,
-                    left: cronEnabled ? 22 : 2,
-                    width: 20,
-                    height: 20,
-                    borderRadius: "50%",
-                    background: "#fff",
-                    boxShadow: "0 1px 3px rgba(0,0,0,0.2)",
-                    transition: "left 0.2s",
-                  }}
-                />
+                <span style={{
+                  position: "absolute", top: 2, left: cronEnabled ? 22 : 2,
+                  width: 20, height: 20, borderRadius: "50%", background: "#fff",
+                  boxShadow: "0 1px 3px rgba(0,0,0,0.2)", transition: "left 0.2s",
+                }} />
               </button>
               <span style={{ fontSize: 14, fontWeight: 500 }}>
                 Cron jobs {cronEnabled ? "enabled" : "disabled"}
@@ -913,61 +850,33 @@ export default function AdminDashboardPage() {
             </div>
 
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, maxWidth: "24rem", marginBottom: 12 }}>
-              <div>
-                <label style={{ display: "block", fontSize: 12, color: "var(--muted)", marginBottom: 4 }}>
-                  Ingest time
-                </label>
-                <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
-                  <input
-                    type="time"
-                    value={ingestTime}
-                    onChange={(e) => setIngestTime(e.target.value)}
-                    style={{ ...inputStyle, width: "100%" }}
-                  />
-                  <button
-                    type="button"
-                    disabled={settingsSaving === "cron_ingest_time"}
-                    onClick={() => saveSetting("cron_ingest_time", ingestTime)}
-                    style={{ ...btnSecondary, whiteSpace: "nowrap", fontSize: 12, padding: "5px 8px" }}
-                  >
-                    {settingsSaving === "cron_ingest_time" ? <Spinner size={14} /> : "Save"}
-                  </button>
-                </div>
-              </div>
-              <div>
-                <label style={{ display: "block", fontSize: 12, color: "var(--muted)", marginBottom: 4 }}>
-                  Digest time
-                </label>
-                <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
-                  <input
-                    type="time"
-                    value={digestTime}
-                    onChange={(e) => setDigestTime(e.target.value)}
-                    style={{ ...inputStyle, width: "100%" }}
-                  />
-                  <button
-                    type="button"
-                    disabled={settingsSaving === "cron_digest_time"}
-                    onClick={() => saveSetting("cron_digest_time", digestTime)}
-                    style={{ ...btnSecondary, whiteSpace: "nowrap", fontSize: 12, padding: "5px 8px" }}
-                  >
-                    {settingsSaving === "cron_digest_time" ? <Spinner size={14} /> : "Save"}
-                  </button>
-                </div>
-              </div>
+              {(["cron_ingest_time", "cron_digest_time"] as const).map((key) => {
+                const label = key === "cron_ingest_time" ? "Ingest time" : "Digest time";
+                const val = key === "cron_ingest_time" ? ingestTime : digestTime;
+                const setter = key === "cron_ingest_time" ? setIngestTime : setDigestTime;
+                return (
+                  <div key={key}>
+                    <label style={{ display: "block", fontSize: 12, color: "var(--muted)", marginBottom: 4 }}>{label}</label>
+                    <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                      <input type="time" value={val} onChange={(e) => setter(e.target.value)} style={{ ...inputStyle, width: "100%" }} />
+                      <button
+                        type="button"
+                        disabled={settingsSaving === key}
+                        onClick={() => saveSetting(key, val)}
+                        style={{ ...btnSecondary, whiteSpace: "nowrap", fontSize: 12, padding: "5px 8px" }}
+                      >
+                        {settingsSaving === key ? <Spinner size={14} /> : "Save"}
+                      </button>
+                    </div>
+                  </div>
+                );
+              })}
             </div>
 
             <div style={{ marginBottom: 12 }}>
-              <label style={{ display: "block", fontSize: 12, color: "var(--muted)", marginBottom: 4 }}>
-                Timezone
-              </label>
+              <label style={{ display: "block", fontSize: 12, color: "var(--muted)", marginBottom: 4 }}>Timezone</label>
               <div style={{ display: "flex", gap: 6, alignItems: "center", maxWidth: "24rem" }}>
-                <input
-                  type="text"
-                  value={cronTimezone}
-                  onChange={(e) => setCronTimezone(e.target.value)}
-                  style={{ ...inputStyle, width: "100%" }}
-                />
+                <input type="text" value={cronTimezone} onChange={(e) => setCronTimezone(e.target.value)} style={{ ...inputStyle, width: "100%" }} />
                 <button
                   type="button"
                   disabled={settingsSaving === "cron_timezone"}
@@ -980,115 +889,213 @@ export default function AdminDashboardPage() {
             </div>
 
             <p style={{ fontSize: 12, color: "var(--muted)", margin: "8px 0 0", maxWidth: "40rem", lineHeight: 1.5 }}>
-              The on/off toggle takes effect immediately — disabled crons return early without
-              running. Times shown here are stored in the database for reference. The actual Vercel
-              cron schedule is a static expression in <code style={{ fontSize: 11 }}>vercel.json</code>;
-              changing it requires a redeployment.
+              The on/off toggle takes effect immediately. Times shown here are stored in the database for
+              reference. The actual Vercel cron schedule is a static expression in{" "}
+              <code style={{ fontSize: 11 }}>vercel.json</code>; changing it requires a redeployment.
             </p>
           </>
         )}
       </section>
 
       {/* ============================================================ */}
-      {/*  KEYWORDS                                                     */}
+      {/*  ENTITY CONFIGURATION                                         */}
       {/* ============================================================ */}
 
       <section style={panelStyle}>
-        <h2 style={{ fontSize: "1rem", margin: "0 0 0.75rem 0" }}>Keywords</h2>
+        <h2 style={{ fontSize: "1rem", margin: "0 0 0.25rem 0" }}>Entity Configuration</h2>
+        <p style={{ fontSize: 13, color: "var(--muted)", margin: "0 0 0.85rem", lineHeight: 1.5 }}>
+          Configure each entity&apos;s service description (used in AI scoring prompts), keywords
+          (used for article matching), and entity-specific digest recipients.
+        </p>
 
-        {!entities && !entitiesLoading && (
+        {!entityConfigs && !entityConfigLoading && (
           <p style={{ margin: 0, color: "var(--muted)", fontSize: 13 }}>
-            Click &ldquo;Load config&rdquo; above to view keywords.
+            Click &ldquo;Load config&rdquo; above to view entity configuration.
           </p>
         )}
-        {entitiesLoading && (
-          <p style={{ margin: 0, color: "var(--muted)" }}>
-            <Spinner /> Loading…
-          </p>
-        )}
-        {entitiesError && (
-          <p style={{ color: "#b91c1c", fontSize: 13, margin: "0 0 8px" }}>{entitiesError}</p>
-        )}
+        {entityConfigLoading && <p style={{ margin: 0, color: "var(--muted)" }}><Spinner /> Loading…</p>}
+        {entityConfigError && <p style={{ color: "#b91c1c", fontSize: 13, margin: "0 0 8px" }}>{entityConfigError}</p>}
 
-        {entities?.map((ent) => {
-          const open = kwExpanded[ent.id] ?? false;
-          const newVal = kwNewInput[ent.id] ?? "";
-          const busy = kwBusy === ent.id;
+        {entityConfigs?.map((ent) => {
+          const open = ecExpanded[ent.id] ?? false;
+          const kwCount = ent.keywords.length;
+          const rcCount = ent.recipients.filter((r) => r.enabled).length;
+          const rcTotal = ent.recipients.length;
+          const busy = kwBusy === ent.id || erBusy === ent.id || descSaving === ent.id;
+
           return (
             <div
               key={ent.id}
               style={{ border: "1px solid var(--border)", borderRadius: 6, marginBottom: 8, overflow: "hidden" }}
             >
+              {/* Section header */}
               <button
                 type="button"
-                onClick={() => setKwExpanded((p) => ({ ...p, [ent.id]: !open }))}
+                onClick={() => setEcExpanded((p) => ({ ...p, [ent.id]: !open }))}
                 style={{ ...sectionHeaderBtn, background: open ? "#f3f4f6" : "#fafafa" }}
               >
-                <span>
+                <span style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
                   {open ? "▼" : "▶"} {ent.name}
-                  <span style={{ fontWeight: 400, fontSize: 12, color: "var(--muted)", marginLeft: 6 }}>
-                    {ent.keywords.length} keyword{ent.keywords.length !== 1 ? "s" : ""}
+                  <span style={{ fontWeight: 400, fontSize: 12, color: "var(--muted)" }}>
+                    {kwCount} keyword{kwCount !== 1 ? "s" : ""}
+                  </span>
+                  <span style={{ fontWeight: 400, fontSize: 12, color: "var(--muted)" }}>
+                    · {rcCount}/{rcTotal} recipient{rcTotal !== 1 ? "s" : ""}
                   </span>
                 </span>
+                {busy && <Spinner size={14} />}
               </button>
+
               {open && (
-                <div style={{ padding: 12, background: "#fff" }}>
-                  {ent.keywords.length === 0 && (
-                    <p style={{ margin: "0 0 8px", fontSize: 13, color: "var(--muted)" }}>
-                      No keywords configured.
-                    </p>
-                  )}
-                  <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 10 }}>
-                    {ent.keywords.map((kw) => (
-                      <span key={kw.id} style={chipStyle}>
-                        {kw.keyword}
-                        <button
-                          type="button"
-                          title="Delete keyword"
-                          onClick={() => deleteKeyword(kw.id)}
+                <div style={{ padding: 14, background: "#fff", display: "grid", gap: 20 }}>
+
+                  {/* ---- Service Description ---- */}
+                  <div>
+                    <div style={{ display: "flex", alignItems: "baseline", gap: 8, marginBottom: 6 }}>
+                      <span style={{ fontSize: 13, fontWeight: 600 }}>Service Description</span>
+                      <span style={{ fontSize: 11, color: "var(--muted)" }}>Used in AI scoring prompts</span>
+                    </div>
+                    <textarea
+                      value={descDraft[ent.id] ?? ent.description}
+                      onChange={(e) => setDescDraft((p) => ({ ...p, [ent.id]: e.target.value }))}
+                      rows={3}
+                      style={{
+                        ...inputStyle,
+                        width: "100%",
+                        resize: "vertical",
+                        fontFamily: "inherit",
+                        lineHeight: 1.5,
+                        boxSizing: "border-box",
+                      }}
+                    />
+                    <div style={{ marginTop: 6, display: "flex", gap: 8, alignItems: "center" }}>
+                      <button
+                        type="button"
+                        disabled={descSaving === ent.id}
+                        onClick={() => saveDescription(ent.id)}
+                        style={{ ...btnPrimary, fontSize: 12, padding: "5px 10px" }}
+                      >
+                        {descSaving === ent.id ? <><Spinner size={13} /> Saving…</> : "Save description"}
+                      </button>
+                      {(descDraft[ent.id] ?? ent.description) !== ent.description && descSaving !== ent.id && (
+                        <span style={{ fontSize: 11, color: "#d97706" }}>Unsaved changes</span>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* ---- Keywords ---- */}
+                  <div>
+                    <div style={{ display: "flex", alignItems: "baseline", gap: 8, marginBottom: 8 }}>
+                      <span style={{ fontSize: 13, fontWeight: 600 }}>Keywords</span>
+                      <span style={{ fontSize: 11, color: "var(--muted)" }}>Trigger article matching</span>
+                    </div>
+                    {ent.keywords.length === 0 && (
+                      <p style={{ margin: "0 0 8px", fontSize: 13, color: "var(--muted)" }}>No keywords configured.</p>
+                    )}
+                    <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 10 }}>
+                      {ent.keywords.map((kw) => (
+                        <span key={kw.id} style={chipStyle}>
+                          {kw.keyword}
+                          <button
+                            type="button"
+                            title="Delete keyword"
+                            onClick={() => deleteKeyword(kw.id, ent.id)}
+                            style={chipDeleteBtn}
+                          >
+                            ×
+                          </button>
+                        </span>
+                      ))}
+                    </div>
+                    <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
+                      <input
+                        type="text"
+                        value={kwNewInput[ent.id] ?? ""}
+                        placeholder="Add keyword…"
+                        onChange={(e) => setKwNewInput((p) => ({ ...p, [ent.id]: e.target.value }))}
+                        onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); addKeyword(ent.id); } }}
+                        style={{ ...inputStyle, minWidth: "12rem" }}
+                      />
+                      <button
+                        type="button"
+                        disabled={kwBusy === ent.id || !(kwNewInput[ent.id] ?? "").trim()}
+                        onClick={() => addKeyword(ent.id)}
+                        style={{
+                          ...btnPrimary,
+                          fontSize: 12, padding: "5px 10px",
+                          opacity: (kwNewInput[ent.id] ?? "").trim() ? 1 : 0.5,
+                          cursor: (kwNewInput[ent.id] ?? "").trim() && kwBusy !== ent.id ? "pointer" : "not-allowed",
+                        }}
+                      >
+                        {kwBusy === ent.id ? <Spinner size={13} /> : null}
+                        Add
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* ---- Entity Recipients ---- */}
+                  <div>
+                    <div style={{ display: "flex", alignItems: "baseline", gap: 8, marginBottom: 8 }}>
+                      <span style={{ fontSize: 13, fontWeight: 600 }}>Entity Recipients</span>
+                      <span style={{ fontSize: 11, color: "var(--muted)" }}>Receive filtered digest for this entity only</span>
+                    </div>
+                    {ent.recipients.length === 0 && (
+                      <p style={{ margin: "0 0 8px", fontSize: 13, color: "var(--muted)" }}>No recipients configured.</p>
+                    )}
+                    <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 10 }}>
+                      {ent.recipients.map((rc) => (
+                        <span
+                          key={rc.id}
                           style={{
-                            background: "none",
-                            border: "none",
-                            cursor: "pointer",
-                            color: "#9ca3af",
-                            fontSize: 14,
-                            lineHeight: 1,
-                            padding: "0 2px",
+                            ...chipStyle,
+                            opacity: rc.enabled ? 1 : 0.5,
+                            borderColor: rc.enabled ? "#d1d5db" : "#e5e7eb",
                           }}
                         >
-                          ×
-                        </button>
-                      </span>
-                    ))}
+                          <span style={{ fontFamily: "ui-monospace, monospace", fontSize: 12 }}>{rc.email}</span>
+                          <button
+                            type="button"
+                            title="Delete recipient"
+                            onClick={() => deleteEntityRecipient(rc.id)}
+                            style={chipDeleteBtn}
+                          >
+                            ×
+                          </button>
+                        </span>
+                      ))}
+                    </div>
+                    <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
+                      <input
+                        type="email"
+                        value={erNewInput[ent.id] ?? ""}
+                        placeholder="email@example.com"
+                        onChange={(e) => {
+                          setErNewInput((p) => ({ ...p, [ent.id]: e.target.value }));
+                          if (erEmailError[ent.id]) setErEmailError((p) => ({ ...p, [ent.id]: "" }));
+                        }}
+                        onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); addEntityRecipient(ent.id); } }}
+                        style={{ ...inputStyle, minWidth: "14rem" }}
+                      />
+                      <button
+                        type="button"
+                        disabled={erBusy === ent.id || !(erNewInput[ent.id] ?? "").trim()}
+                        onClick={() => addEntityRecipient(ent.id)}
+                        style={{
+                          ...btnPrimary,
+                          fontSize: 12, padding: "5px 10px",
+                          opacity: (erNewInput[ent.id] ?? "").trim() ? 1 : 0.5,
+                          cursor: (erNewInput[ent.id] ?? "").trim() && erBusy !== ent.id ? "pointer" : "not-allowed",
+                        }}
+                      >
+                        {erBusy === ent.id ? <Spinner size={13} /> : null}
+                        Add
+                      </button>
+                    </div>
+                    {erEmailError[ent.id] && (
+                      <p style={{ color: "#b91c1c", fontSize: 12, margin: "4px 0 0" }}>{erEmailError[ent.id]}</p>
+                    )}
                   </div>
-                  <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
-                    <input
-                      type="text"
-                      value={newVal}
-                      placeholder="Add keyword…"
-                      onChange={(e) => setKwNewInput((p) => ({ ...p, [ent.id]: e.target.value }))}
-                      onKeyDown={(e) => {
-                        if (e.key === "Enter") {
-                          e.preventDefault();
-                          addKeyword(ent.id);
-                        }
-                      }}
-                      style={{ ...inputStyle, minWidth: "12rem" }}
-                    />
-                    <button
-                      type="button"
-                      disabled={busy || !newVal.trim()}
-                      onClick={() => addKeyword(ent.id)}
-                      style={{
-                        ...btnPrimary,
-                        opacity: newVal.trim() ? 1 : 0.5,
-                        cursor: newVal.trim() && !busy ? "pointer" : "not-allowed",
-                      }}
-                    >
-                      {busy && <Spinner size={14} />}
-                      Add
-                    </button>
-                  </div>
+
                 </div>
               )}
             </div>
@@ -1097,36 +1104,89 @@ export default function AdminDashboardPage() {
       </section>
 
       {/* ============================================================ */}
-      {/*  RECIPIENTS                                                   */}
+      {/*  ADMIN RECIPIENTS                                             */}
       {/* ============================================================ */}
 
       <section style={panelStyle}>
-        <h2 style={{ fontSize: "1rem", margin: "0 0 0.75rem 0" }}>Recipients</h2>
+        <h2 style={{ fontSize: "1rem", margin: "0 0 0.25rem 0" }}>Admin Recipients</h2>
+        <p style={{ fontSize: 13, color: "var(--muted)", margin: "0 0 0.85rem", lineHeight: 1.5 }}>
+          Admin recipients receive the full aggregated digest (all entities) via the Digest section below.
+        </p>
 
-        {!entities && !entitiesLoading && (
+        {!entityConfigs && !entityConfigLoading && (
           <p style={{ margin: 0, color: "var(--muted)", fontSize: 13 }}>
-            Click &ldquo;Load config&rdquo; above to view recipients.
-          </p>
-        )}
-        {entitiesLoading && (
-          <p style={{ margin: 0, color: "var(--muted)" }}>
-            <Spinner /> Loading…
+            Click &ldquo;Load config&rdquo; above to view admin recipients.
           </p>
         )}
 
-        {entities && (
-          <>
-            {renderRecipientGroup(
-              ADMIN_KEY,
-              "Admin",
-              adminRecipients,
-              "(receives all entities)",
-              true
+        {entityConfigs && (
+          <div style={{ border: "1.5px solid #a78bfa", borderRadius: 6, overflow: "hidden" }}>
+            <button
+              type="button"
+              onClick={() => setRcExpanded((p) => ({ ...p, [ADMIN_KEY]: !(p[ADMIN_KEY] ?? false) }))}
+              style={{
+                ...sectionHeaderBtn,
+                background: rcExpanded[ADMIN_KEY] ? "#ede9fe" : "#f5f3ff",
+              }}
+            >
+              <span>
+                {rcExpanded[ADMIN_KEY] ? "▼" : "▶"} Admin
+                <span style={{ fontWeight: 400, fontSize: 11, color: "#7c3aed", marginLeft: 6 }}>
+                  (receives all entities)
+                </span>
+                <span style={{ fontWeight: 400, fontSize: 12, color: "var(--muted)", marginLeft: 6 }}>
+                  {adminRecipients.filter((r) => r.enabled).length}/{adminRecipients.length} recipient
+                  {adminRecipients.length !== 1 ? "s" : ""}
+                </span>
+              </span>
+            </button>
+            {rcExpanded[ADMIN_KEY] && (
+              <div style={{ padding: 12, background: "#fff" }}>
+                {adminRecipients.length === 0 && (
+                  <p style={{ margin: "0 0 8px", fontSize: 13, color: "var(--muted)" }}>No admin recipients configured.</p>
+                )}
+                <div style={{ display: "grid", gap: 6, marginBottom: 10 }}>
+                  {adminRecipients.map((rc) => (
+                    <AdminRecipientRow
+                      key={rc.id}
+                      rc={rc}
+                      onToggle={toggleAdminRecipient}
+                      onDelete={deleteAdminRecipient}
+                    />
+                  ))}
+                </div>
+                <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
+                  <input
+                    type="email"
+                    value={rcNewInput[ADMIN_KEY] ?? ""}
+                    placeholder="email@example.com"
+                    onChange={(e) => {
+                      setRcNewInput((p) => ({ ...p, [ADMIN_KEY]: e.target.value }));
+                      if (rcEmailError[ADMIN_KEY]) setRcEmailError((p) => ({ ...p, [ADMIN_KEY]: "" }));
+                    }}
+                    onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); addAdminRecipient(); } }}
+                    style={{ ...inputStyle, minWidth: "14rem" }}
+                  />
+                  <button
+                    type="button"
+                    disabled={rcBusy === ADMIN_KEY || !(rcNewInput[ADMIN_KEY] ?? "").trim()}
+                    onClick={addAdminRecipient}
+                    style={{
+                      ...btnPrimary,
+                      opacity: (rcNewInput[ADMIN_KEY] ?? "").trim() ? 1 : 0.5,
+                      cursor: (rcNewInput[ADMIN_KEY] ?? "").trim() && rcBusy !== ADMIN_KEY ? "pointer" : "not-allowed",
+                    }}
+                  >
+                    {rcBusy === ADMIN_KEY && <Spinner size={14} />}
+                    Add
+                  </button>
+                </div>
+                {rcEmailError[ADMIN_KEY] && (
+                  <p style={{ color: "#b91c1c", fontSize: 12, margin: "4px 0 0" }}>{rcEmailError[ADMIN_KEY]}</p>
+                )}
+              </div>
             )}
-            {entities.map((ent) =>
-              renderRecipientGroup(String(ent.id), ent.name, ent.recipients)
-            )}
-          </>
+          </div>
         )}
       </section>
 
@@ -1146,18 +1206,10 @@ export default function AdminDashboardPage() {
           Run ingestion
         </button>
         {ingestResult && (
-          <pre
-            style={{
-              marginTop: 12,
-              padding: 12,
-              background: "#f9fafb",
-              borderRadius: 6,
-              fontSize: 12,
-              overflow: "auto",
-              maxHeight: 280,
-              border: "1px solid var(--border)",
-            }}
-          >
+          <pre style={{
+            marginTop: 12, padding: 12, background: "#f9fafb", borderRadius: 6,
+            fontSize: 12, overflow: "auto", maxHeight: 280, border: "1px solid var(--border)",
+          }}>
             {JSON.stringify(ingestResult, null, 2)}
           </pre>
         )}
@@ -1170,9 +1222,9 @@ export default function AdminDashboardPage() {
       <section style={panelStyle}>
         <h2 style={{ fontSize: "1rem", margin: "0 0 0.5rem 0" }}>Digest</h2>
         <p style={{ fontSize: 13, color: "var(--muted)", margin: "0 0 12px", maxWidth: "40rem", lineHeight: 1.5 }}>
-          Preview and send the aggregated admin digest (all entities, all scored articles) to
-          enabled <strong>Admin</strong> recipients. Entity recipients receive their filtered
-          digests via the automated cron job.
+          Preview and send the aggregated admin digest (all entities, all scored articles) to enabled{" "}
+          <strong>Admin</strong> recipients. Entity recipients receive their filtered digests via the
+          automated cron job.
         </p>
         <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginBottom: 12 }}>
           <button
@@ -1189,13 +1241,10 @@ export default function AdminDashboardPage() {
             onClick={sendDigest}
             disabled={sendLoading}
             style={{
-              padding: "8px 14px",
-              fontSize: 13,
+              padding: "8px 14px", fontSize: 13,
               cursor: sendLoading ? "wait" : "pointer",
-              borderRadius: 6,
-              border: "1px solid #b45309",
-              background: "#fff7ed",
-              color: "#9a3412",
+              borderRadius: 6, border: "1px solid #b45309",
+              background: "#fff7ed", color: "#9a3412",
             }}
           >
             {sendLoading && <Spinner />}
@@ -1205,41 +1254,26 @@ export default function AdminDashboardPage() {
         {previewRecipient && (
           <p style={{ fontSize: 13, margin: "0 0 8px", color: "var(--muted)" }}>
             Preview recipient:{" "}
-            <span style={{ fontFamily: "ui-monospace, monospace", color: "#111" }}>
-              {previewRecipient}
-            </span>
+            <span style={{ fontFamily: "ui-monospace, monospace", color: "#111" }}>{previewRecipient}</span>
           </p>
         )}
-        {previewError && (
-          <p style={{ color: "#b91c1c", fontSize: 14, margin: "0 0 8px" }}>{previewError}</p>
-        )}
+        {previewError && <p style={{ color: "#b91c1c", fontSize: 14, margin: "0 0 8px" }}>{previewError}</p>}
         {previewHtml && (
           <iframe
             title="Digest preview"
             srcDoc={previewHtml}
             sandbox="allow-same-origin allow-popups allow-popups-to-escape-sandbox"
             style={{
-              width: "100%",
-              minHeight: 420,
-              border: "1px solid var(--border)",
-              borderRadius: 6,
-              background: "#fff",
+              width: "100%", minHeight: 420,
+              border: "1px solid var(--border)", borderRadius: 6, background: "#fff",
             }}
           />
         )}
         {sendResult && (
-          <pre
-            style={{
-              marginTop: 12,
-              padding: 12,
-              background: "#f9fafb",
-              borderRadius: 6,
-              fontSize: 12,
-              overflow: "auto",
-              maxHeight: 220,
-              border: "1px solid var(--border)",
-            }}
-          >
+          <pre style={{
+            marginTop: 12, padding: 12, background: "#f9fafb", borderRadius: 6,
+            fontSize: 12, overflow: "auto", maxHeight: 220, border: "1px solid var(--border)",
+          }}>
             {JSON.stringify(sendResult, null, 2)}
           </pre>
         )}

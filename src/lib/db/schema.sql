@@ -1,6 +1,7 @@
 CREATE TABLE IF NOT EXISTS entities (
   id          serial PRIMARY KEY,
   name        text UNIQUE NOT NULL,
+  description text NOT NULL DEFAULT '',
   enabled     boolean NOT NULL DEFAULT true,
   created_at  timestamptz NOT NULL DEFAULT now()
 );

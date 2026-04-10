@@ -19,6 +19,8 @@ export interface Entity {
   aliases: string[];
   keywords: string[];
   recipients: string[];
+  /** Service description used in AI scoring prompts for richer context. */
+  description: string;
 }
 
 /** Optional future shape for richer rules — PoC uses `Entity.keywords` + `Entity.aliases` only. */
