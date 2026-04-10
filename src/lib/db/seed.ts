@@ -45,6 +45,7 @@ const ENTITIES = [
   "LinkPeople",
   "Te Pou",
   "Just a thought",
+  "The Peoples Project",
 ];
 
 /* ── Default settings ── */
