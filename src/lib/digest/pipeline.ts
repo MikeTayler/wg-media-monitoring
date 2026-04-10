@@ -1,4 +1,3 @@
-import { readFile } from "fs/promises";
 import {
   getEntities,
   getEntityRecipientEmails,
@@ -19,18 +18,8 @@ import type {
   AdminDigestArticleRow,
 } from "@/lib/email/template";
 import { sendDigestEmail } from "@/lib/email/sender";
-import { ARTICLES_JSON_PATH } from "@/lib/ingest/all";
+import { query, ensureTablesExist } from "@/lib/db";
 import type { Article, Entity } from "@/lib/types";
-
-type StoredFile = {
-  updatedAt?: string;
-  articles: Array<
-    Omit<Article, "publishedAt" | "ingestedAt"> & {
-      publishedAt: string;
-      ingestedAt: string;
-    }
-  >;
-};
 
 export type ScoredDigestEntry = {
   entityId: string;
@@ -50,18 +39,29 @@ const SOURCE_LABELS: Record<Article["source"], string> = {
   nzherald: "NZ Herald",
 };
 
-function reviveArticles(data: StoredFile): Article[] {
-  return data.articles.map((a) => ({
-    ...a,
-    publishedAt: new Date(a.publishedAt),
-    ingestedAt: new Date(a.ingestedAt),
-  }));
-}
-
 export async function loadArticlesFromStore(): Promise<Article[]> {
-  const raw = await readFile(ARTICLES_JSON_PATH, "utf8");
-  const data = JSON.parse(raw) as StoredFile;
-  return reviveArticles(data);
+  await ensureTablesExist();
+  const rows = await query<{
+    id: string;
+    source: string;
+    url: string;
+    title: string;
+    body: string;
+    published_at: string;
+    ingested_at: string;
+    paywalled: boolean;
+  }>("SELECT id, source, url, title, body, published_at, ingested_at, paywalled FROM articles ORDER BY published_at DESC");
+
+  return rows.map((r) => ({
+    id: r.id,
+    source: r.source as Article["source"],
+    url: r.url,
+    title: r.title,
+    body: r.body,
+    publishedAt: new Date(r.published_at),
+    ingestedAt: new Date(r.ingested_at),
+    paywalled: r.paywalled,
+  }));
 }
 
 function entityById(entities: Entity[], id: string) {

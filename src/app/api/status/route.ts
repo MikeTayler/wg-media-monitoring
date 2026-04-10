@@ -9,7 +9,7 @@ export const dynamic = "force-dynamic";
 
 /**
  * Public PoC status — no auth (`project.md`).
- * Reads `/tmp/wg-pipeline-status.json` (written by ingest/digest on each run).
+ * Reads pipeline status from the Neon `pipeline_status` table.
  */
 export async function GET() {
   try {

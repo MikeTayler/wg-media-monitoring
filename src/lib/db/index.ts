@@ -39,3 +39,37 @@ export async function query<T extends Record<string, unknown> = Record<string, u
   const rows = await sql.query(text, params);
   return rows as T[];
 }
+
+let _tablesEnsured = false;
+
+/**
+ * Creates the articles and pipeline_status tables if they don't exist.
+ * Called at the start of ingest and digest to guarantee the schema is present.
+ * Runs once per process lifetime (cached via module-level flag).
+ */
+export async function ensureTablesExist(): Promise<void> {
+  if (_tablesEnsured) return;
+  await query(`
+    CREATE TABLE IF NOT EXISTS articles (
+      id           text PRIMARY KEY,
+      source       text NOT NULL,
+      url          text UNIQUE NOT NULL,
+      title        text NOT NULL,
+      body         text NOT NULL DEFAULT '',
+      published_at timestamptz NOT NULL,
+      ingested_at  timestamptz NOT NULL DEFAULT now(),
+      paywalled    boolean NOT NULL DEFAULT false,
+      batch_id     text NOT NULL
+    )
+  `);
+  await query(`CREATE INDEX IF NOT EXISTS idx_articles_batch_id ON articles(batch_id)`);
+  await query(`CREATE INDEX IF NOT EXISTS idx_articles_ingested_at ON articles(ingested_at)`);
+  await query(`
+    CREATE TABLE IF NOT EXISTS pipeline_status (
+      key        text PRIMARY KEY,
+      value      jsonb NOT NULL DEFAULT '{}',
+      updated_at timestamptz NOT NULL DEFAULT now()
+    )
+  `);
+  _tablesEnsured = true;
+}

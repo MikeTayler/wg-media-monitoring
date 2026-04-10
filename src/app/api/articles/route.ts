@@ -1,40 +1,25 @@
-import { readFile } from "fs/promises";
 import { NextResponse } from "next/server";
 import { authorizeCron } from "@/lib/api/cron-auth";
-import { ARTICLES_JSON_PATH } from "@/lib/ingest/all";
+import { query } from "@/lib/db";
 
 export const dynamic = "force-dynamic";
 
-const JSON_HEADERS = { "Content-Type": "application/json" };
-
 /**
- * Debug: raw `/tmp/articles.json` (same shape as written by ingest).
+ * Debug: articles from the Neon `articles` table.
  * Auth: `?secret=`, `Authorization: Bearer`, or `x-cron-secret` — see `authorizeCron`.
  */
 export async function GET(request: Request) {
   if (!authorizeCron(request)) {
-    return NextResponse.json(
-      { ok: false, error: "Unauthorized" },
-      { status: 401, headers: JSON_HEADERS }
-    );
+    return NextResponse.json({ ok: false, error: "Unauthorized" }, { status: 401 });
   }
 
   try {
-    const raw = await readFile(ARTICLES_JSON_PATH, "utf8");
-    const data = JSON.parse(raw) as unknown;
-    return NextResponse.json(data, { headers: JSON_HEADERS });
-  } catch (err) {
-    const code = err && typeof err === "object" && "code" in err ? (err as NodeJS.ErrnoException).code : undefined;
-    if (code === "ENOENT") {
-      return NextResponse.json(
-        { articles: [], updatedAt: null },
-        { headers: JSON_HEADERS }
-      );
-    }
-    const message = err instanceof Error ? err.message : String(err);
-    return NextResponse.json(
-      { ok: false, error: message },
-      { status: 500, headers: JSON_HEADERS }
+    const articles = await query(
+      "SELECT id, source, url, title, body, published_at, ingested_at, paywalled, batch_id FROM articles ORDER BY published_at DESC"
     );
+    return NextResponse.json({ articles, updatedAt: articles[0]?.ingested_at ?? null });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    return NextResponse.json({ ok: false, error: message }, { status: 500 });
   }
 }

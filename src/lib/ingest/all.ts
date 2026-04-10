@@ -1,13 +1,11 @@
-import { promises as fs } from "fs";
 import type { Article } from "@/lib/types";
+import { query, ensureTablesExist } from "@/lib/db";
 import { fetchFullText } from "@/lib/sources/full-text";
 import { fetchNewstalkzbArticles } from "@/lib/sources/newstalkzb";
 import { fetchNzheraldArticles } from "@/lib/sources/nzherald";
 import { fetchRnzArticles } from "@/lib/sources/rnz";
 import { fetchScoopArticles } from "@/lib/sources/scoop";
 import { fetchStuffArticles } from "@/lib/sources/stuff";
-
-export const ARTICLES_JSON_PATH = "/tmp/articles.json";
 
 type SourceKey = Article["source"];
 
@@ -35,19 +33,6 @@ function dedupeByUrl(articles: Article[]): Article[] {
   return out;
 }
 
-type SerializedArticle = Omit<Article, "publishedAt" | "ingestedAt"> & {
-  publishedAt: string;
-  ingestedAt: string;
-};
-
-function serializeArticles(articles: Article[]): SerializedArticle[] {
-  return articles.map((a) => ({
-    ...a,
-    publishedAt: a.publishedAt.toISOString(),
-    ingestedAt: a.ingestedAt.toISOString(),
-  }));
-}
-
 const FULL_TEXT_DELAY_MS = 300;
 
 function sleep(ms: number): Promise<void> {
@@ -57,7 +42,6 @@ function sleep(ms: number): Promise<void> {
 export type IngestAllResult = {
   ok: boolean;
   updatedAt: string;
-  path: string;
   totalUnique: number;
   bySource: Record<SourceKey, number>;
   fullTextEnriched: number;
@@ -66,10 +50,13 @@ export type IngestAllResult = {
 };
 
 /**
- * Fetches all PoC RSS sources, deduplicates by URL, writes `/tmp/articles.json`.
- * Per-source failures are logged and recorded in `errors`; other sources still run.
+ * Fetches all PoC RSS sources, deduplicates by URL, writes articles to the
+ * Neon `articles` table. Per-source failures are logged and recorded in
+ * `errors`; other sources still run.
  */
 export async function ingestAll(): Promise<IngestAllResult> {
+  await ensureTablesExist();
+
   const bySource: Record<SourceKey, number> = {
     stuff: 0,
     rnz: 0,
@@ -134,24 +121,41 @@ export async function ingestAll(): Promise<IngestAllResult> {
   );
 
   const updatedAt = new Date().toISOString();
+  const batchId = updatedAt;
 
-  await fs.writeFile(
-    ARTICLES_JSON_PATH,
-    JSON.stringify(
-      {
-        updatedAt,
-        articles: serializeArticles(unique),
-      },
-      null,
-      2
-    ),
-    "utf8"
-  );
+  // Delete articles from previous batches, then upsert the current batch.
+  await query("DELETE FROM articles WHERE batch_id != $1", [batchId]);
+
+  for (const article of unique) {
+    await query(
+      `INSERT INTO articles (id, source, url, title, body, published_at, ingested_at, paywalled, batch_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+       ON CONFLICT (url) DO UPDATE SET
+         title        = EXCLUDED.title,
+         body         = EXCLUDED.body,
+         published_at = EXCLUDED.published_at,
+         ingested_at  = EXCLUDED.ingested_at,
+         paywalled    = EXCLUDED.paywalled,
+         batch_id     = EXCLUDED.batch_id`,
+      [
+        article.id,
+        article.source,
+        article.url,
+        article.title,
+        article.body,
+        article.publishedAt.toISOString(),
+        article.ingestedAt.toISOString(),
+        article.paywalled,
+        batchId,
+      ]
+    );
+  }
+
+  console.log(`[ingest] Wrote ${unique.length} articles to database (batch ${batchId})`);
 
   return {
     ok: true,
     updatedAt,
-    path: ARTICLES_JSON_PATH,
     totalUnique: unique.length,
     bySource,
     fullTextEnriched,

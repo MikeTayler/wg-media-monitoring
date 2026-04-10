@@ -27,3 +27,24 @@ CREATE TABLE IF NOT EXISTS settings (
   value       text NOT NULL,
   updated_at  timestamptz NOT NULL DEFAULT now()
 );
+
+CREATE TABLE IF NOT EXISTS articles (
+  id           text PRIMARY KEY,
+  source       text NOT NULL,
+  url          text UNIQUE NOT NULL,
+  title        text NOT NULL,
+  body         text NOT NULL DEFAULT '',
+  published_at timestamptz NOT NULL,
+  ingested_at  timestamptz NOT NULL DEFAULT now(),
+  paywalled    boolean NOT NULL DEFAULT false,
+  batch_id     text NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_articles_batch_id ON articles(batch_id);
+CREATE INDEX IF NOT EXISTS idx_articles_ingested_at ON articles(ingested_at);
+
+CREATE TABLE IF NOT EXISTS pipeline_status (
+  key        text PRIMARY KEY,
+  value      jsonb NOT NULL DEFAULT '{}',
+  updated_at timestamptz NOT NULL DEFAULT now()
+);

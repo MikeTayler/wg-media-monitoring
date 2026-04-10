@@ -1,7 +1,4 @@
-import { readFile, writeFile } from "fs/promises";
-
-/** PoC pipeline status next to other `/tmp` JSON stores (see `project.md`). */
-export const PIPELINE_STATUS_PATH = "/tmp/wg-pipeline-status.json";
+import { query } from "@/lib/db";
 
 export type PipelineErrorEntry = {
   at: string;
@@ -21,28 +18,6 @@ export type PipelineStatusFile = {
 
 const MS_24H = 24 * 60 * 60 * 1000;
 
-function defaultStatus(): PipelineStatusFile {
-  return {
-    lastIngestion: null,
-    lastDigest: null,
-    errors: [],
-  };
-}
-
-export async function readPipelineStatus(): Promise<PipelineStatusFile> {
-  try {
-    const raw = await readFile(PIPELINE_STATUS_PATH, "utf8");
-    const data = JSON.parse(raw) as PipelineStatusFile;
-    return {
-      lastIngestion: data.lastIngestion ?? null,
-      lastDigest: data.lastDigest ?? null,
-      errors: Array.isArray(data.errors) ? data.errors : [],
-    };
-  } catch {
-    return defaultStatus();
-  }
-}
-
 function trimErrorsTo24h(errors: PipelineErrorEntry[]): PipelineErrorEntry[] {
   const cutoff = Date.now() - MS_24H;
   return errors.filter((e) => {
@@ -56,15 +31,40 @@ export function filterErrorsLast24h(errors: PipelineErrorEntry[]): PipelineError
   return trimErrorsTo24h(errors);
 }
 
-async function persist(status: PipelineStatusFile): Promise<void> {
-  const trimmed = {
-    ...status,
-    errors: trimErrorsTo24h(status.errors),
-  };
-  await writeFile(
-    PIPELINE_STATUS_PATH,
-    JSON.stringify(trimmed, null, 2),
-    "utf8"
+export async function readPipelineStatus(): Promise<PipelineStatusFile> {
+  try {
+    const rows = await query<{ key: string; value: string }>(
+      "SELECT key, value FROM pipeline_status"
+    );
+    const map = new Map(rows.map((r) => [r.key, r.value]));
+
+    const lastIngestion = map.has("last_ingestion")
+      ? (JSON.parse(map.get("last_ingestion") as string) as PipelineStatusFile["lastIngestion"])
+      : null;
+    const lastDigest = map.has("last_digest")
+      ? (JSON.parse(map.get("last_digest") as string) as PipelineStatusFile["lastDigest"])
+      : null;
+    const errors = map.has("errors")
+      ? (JSON.parse(map.get("errors") as string) as PipelineErrorEntry[])
+      : [];
+
+    return {
+      lastIngestion,
+      lastDigest,
+      errors: Array.isArray(errors) ? errors : [],
+    };
+  } catch {
+    return { lastIngestion: null, lastDigest: null, errors: [] };
+  }
+}
+
+async function persistErrors(errors: PipelineErrorEntry[]): Promise<void> {
+  const trimmed = trimErrorsTo24h(errors);
+  const value = JSON.stringify(trimmed);
+  await query(
+    `INSERT INTO pipeline_status (key, value, updated_at) VALUES ('errors', $1::jsonb, now())
+     ON CONFLICT (key) DO UPDATE SET value = $1::jsonb, updated_at = now()`,
+    [value]
   );
 }
 
@@ -72,33 +72,37 @@ export async function recordIngestSuccess(
   articleCount: number,
   perSourceErrors: Record<string, string>
 ): Promise<void> {
-  const status = await readPipelineStatus();
-  status.lastIngestion = {
-    at: new Date().toISOString(),
-    articleCount,
-  };
-  const now = new Date().toISOString();
-  for (const [sourceKey, message] of Object.entries(perSourceErrors)) {
-    status.errors.push({
-      at: now,
-      source: `ingest:${sourceKey}`,
-      message,
-    });
+  const value = JSON.stringify({ at: new Date().toISOString(), articleCount });
+  await query(
+    `INSERT INTO pipeline_status (key, value, updated_at) VALUES ('last_ingestion', $1::jsonb, now())
+     ON CONFLICT (key) DO UPDATE SET value = $1::jsonb, updated_at = now()`,
+    [value]
+  );
+
+  if (Object.keys(perSourceErrors).length > 0) {
+    const status = await readPipelineStatus();
+    const now = new Date().toISOString();
+    for (const [sourceKey, message] of Object.entries(perSourceErrors)) {
+      status.errors.push({ at: now, source: `ingest:${sourceKey}`, message });
+    }
+    await persistErrors(status.errors);
   }
-  await persist(status);
 }
 
 export async function recordDigestRun(stats: {
   recipientCount: number;
   emailsSent: number;
 }): Promise<void> {
-  const status = await readPipelineStatus();
-  status.lastDigest = {
+  const value = JSON.stringify({
     at: new Date().toISOString(),
     recipientCount: stats.recipientCount,
     emailsSent: stats.emailsSent,
-  };
-  await persist(status);
+  });
+  await query(
+    `INSERT INTO pipeline_status (key, value, updated_at) VALUES ('last_digest', $1::jsonb, now())
+     ON CONFLICT (key) DO UPDATE SET value = $1::jsonb, updated_at = now()`,
+    [value]
+  );
 }
 
 export async function recordPipelineError(
@@ -106,10 +110,6 @@ export async function recordPipelineError(
   message: string
 ): Promise<void> {
   const status = await readPipelineStatus();
-  status.errors.push({
-    at: new Date().toISOString(),
-    source,
-    message,
-  });
-  await persist(status);
+  status.errors.push({ at: new Date().toISOString(), source, message });
+  await persistErrors(status.errors);
 }
