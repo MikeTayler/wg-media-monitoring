@@ -31,22 +31,24 @@ export function filterErrorsLast24h(errors: PipelineErrorEntry[]): PipelineError
   return trimErrorsTo24h(errors);
 }
 
+function parseJsonbValue<T>(raw: unknown): T | null {
+  if (raw == null) return null;
+  if (typeof raw === "string") {
+    try { return JSON.parse(raw) as T; } catch { return null; }
+  }
+  return raw as T;
+}
+
 export async function readPipelineStatus(): Promise<PipelineStatusFile> {
   try {
-    const rows = await query<{ key: string; value: string }>(
+    const rows = await query<{ key: string; value: unknown }>(
       "SELECT key, value FROM pipeline_status"
     );
     const map = new Map(rows.map((r) => [r.key, r.value]));
 
-    const lastIngestion = map.has("last_ingestion")
-      ? (JSON.parse(map.get("last_ingestion") as string) as PipelineStatusFile["lastIngestion"])
-      : null;
-    const lastDigest = map.has("last_digest")
-      ? (JSON.parse(map.get("last_digest") as string) as PipelineStatusFile["lastDigest"])
-      : null;
-    const errors = map.has("errors")
-      ? (JSON.parse(map.get("errors") as string) as PipelineErrorEntry[])
-      : [];
+    const lastIngestion = parseJsonbValue<PipelineStatusFile["lastIngestion"]>(map.get("last_ingestion"));
+    const lastDigest = parseJsonbValue<PipelineStatusFile["lastDigest"]>(map.get("last_digest"));
+    const errors = parseJsonbValue<PipelineErrorEntry[]>(map.get("errors")) ?? [];
 
     return {
       lastIngestion,
@@ -72,6 +74,7 @@ export async function recordIngestSuccess(
   articleCount: number,
   perSourceErrors: Record<string, string>
 ): Promise<void> {
+  console.log(`[status] Recording ingest success: articleCount=${articleCount}`);
   const value = JSON.stringify({ at: new Date().toISOString(), articleCount });
   await query(
     `INSERT INTO pipeline_status (key, value, updated_at) VALUES ('last_ingestion', $1::jsonb, now())

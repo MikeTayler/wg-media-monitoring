@@ -33,6 +33,7 @@ export async function GET() {
     });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
+    console.error("[status] Failed to read pipeline status:", message);
     return NextResponse.json(
       {
         ok: false,
