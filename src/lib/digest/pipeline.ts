@@ -164,48 +164,75 @@ export function digestEmailSubject(): string {
   return `Wise Group Media Monitor — Daily digest (${dateStr})`;
 }
 
+const CONCURRENCY = 5;
+
 /**
  * Keyword match → AI score (≥40) → summary. Returns scored entries and keyword match count.
+ * Processes matches in parallel batches of CONCURRENCY to stay within the function timeout.
  */
 export async function buildScoredDigestEntries(
   articles: Article[],
   entities: Entity[]
 ): Promise<{ entries: ScoredDigestEntry[]; keywordMatchPairs: number }> {
-  let keywordMatchPairs = 0;
-  const entries: ScoredDigestEntry[] = [];
+  // Step 1: Collect all keyword match pairs upfront
+  const matchPairs: Array<{
+    article: Article;
+    entityId: string;
+    matchedKeywords: string[];
+  }> = [];
 
   for (const article of articles) {
     const matches = matchArticleToEntities(article, entities);
-    keywordMatchPairs += matches.length;
-
     for (const m of matches) {
-      const entity = entityById(entities, m.entityId);
-      if (!entity) continue;
+      matchPairs.push({ article, entityId: m.entityId, matchedKeywords: m.matchedKeywords });
+    }
+  }
 
-      const { score, reason } = await scoreArticleRelevance({
-        article: {
-          title: article.title,
-          body: article.body,
-          source: article.source,
-          url: article.url,
-          paywalled: article.paywalled,
-        },
-        entity: { name: entity.name, keywords: entity.keywords, description: entity.description ?? "" },
-      });
+  const keywordMatchPairs = matchPairs.length;
+  const entries: ScoredDigestEntry[] = [];
 
-      if (score < RELEVANCE_DISCARD_BELOW) continue;
+  // Step 2: Process in parallel batches
+  for (let i = 0; i < matchPairs.length; i += CONCURRENCY) {
+    const batch = matchPairs.slice(i, i + CONCURRENCY);
 
-      const summary = await summariseArticle(article, { relevanceScore: score });
+    const results = await Promise.allSettled(
+      batch.map(async (pair) => {
+        const entity = entityById(entities, pair.entityId);
+        if (!entity) return null;
 
-      entries.push({
-        entityId: entity.id,
-        entityName: entity.name,
-        article,
-        relevanceScore: score,
-        relevanceReason: reason,
-        summary: summary.trim(),
-        matchedKeywords: m.matchedKeywords,
-      });
+        const { score, reason } = await scoreArticleRelevance({
+          article: {
+            title: pair.article.title,
+            body: pair.article.body,
+            source: pair.article.source,
+            url: pair.article.url,
+            paywalled: pair.article.paywalled,
+          },
+          entity: { name: entity.name, keywords: entity.keywords, description: entity.description ?? "" },
+        });
+
+        if (score < RELEVANCE_DISCARD_BELOW) return null;
+
+        const summary = await summariseArticle(pair.article, { relevanceScore: score });
+
+        return {
+          entityId: entity.id,
+          entityName: entity.name,
+          article: pair.article,
+          relevanceScore: score,
+          relevanceReason: reason,
+          summary: summary.trim(),
+          matchedKeywords: pair.matchedKeywords,
+        } satisfies ScoredDigestEntry;
+      })
+    );
+
+    for (const result of results) {
+      if (result.status === "fulfilled" && result.value) {
+        entries.push(result.value);
+      } else if (result.status === "rejected") {
+        console.error("[digest] Batch item failed:", result.reason);
+      }
     }
   }
 
