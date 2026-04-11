@@ -188,6 +188,7 @@ export async function buildScoredDigestEntries(
   }
 
   const keywordMatchPairs = matchPairs.length;
+  console.log(`[digest] Scoring ${matchPairs.length} keyword match pairs across ${entities.length} entities (concurrency: ${CONCURRENCY})`);
   const entries: ScoredDigestEntry[] = [];
 
   // Step 2: Process in parallel batches
