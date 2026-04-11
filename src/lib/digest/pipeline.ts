@@ -5,10 +5,9 @@ import {
 } from "@/lib/config";
 import {
   RELEVANCE_DISCARD_BELOW,
-  scoreArticleRelevance,
+  scoreAndSummariseArticle,
 } from "@/lib/engine/ai-scorer";
 import { matchArticleToEntities } from "@/lib/engine/keywords";
-import { summariseArticle } from "@/lib/engine/summariser";
 import { renderDigestHtml, scoreToRelevanceBand } from "@/lib/email/template";
 import { renderAdminDigestHtml } from "@/lib/email/template";
 import type {
@@ -164,7 +163,7 @@ export function digestEmailSubject(): string {
   return `Wise Group Media Monitor — Daily digest (${dateStr})`;
 }
 
-const CONCURRENCY = 5;
+const CONCURRENCY = 10;
 
 /**
  * Keyword match → AI score (≥40) → summary. Returns scored entries and keyword match count.
@@ -200,7 +199,7 @@ export async function buildScoredDigestEntries(
         const entity = entityById(entities, pair.entityId);
         if (!entity) return null;
 
-        const { score, reason } = await scoreArticleRelevance({
+        const { score, reason, summary } = await scoreAndSummariseArticle({
           article: {
             title: pair.article.title,
             body: pair.article.body,
@@ -213,15 +212,13 @@ export async function buildScoredDigestEntries(
 
         if (score < RELEVANCE_DISCARD_BELOW) return null;
 
-        const summary = await summariseArticle(pair.article, { relevanceScore: score });
-
         return {
           entityId: entity.id,
           entityName: entity.name,
           article: pair.article,
           relevanceScore: score,
           relevanceReason: reason,
-          summary: summary.trim(),
+          summary,
           matchedKeywords: pair.matchedKeywords,
         } satisfies ScoredDigestEntry;
       })
