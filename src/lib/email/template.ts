@@ -10,6 +10,8 @@ export type DigestArticleRow = {
   title: string;
   url: string;
   sourceLabel: string;
+  /** Article publication date, display-only (already localised). */
+  publishedLabel: string;
   paywalled: boolean;
   relevanceBand: RelevanceBand;
   relevanceScore: number;
@@ -112,7 +114,7 @@ function renderArticleRow(row: DigestArticleRow): string {
     "</tr>",
     "<tr>",
     '<td style="padding-top:8px;">',
-    `<span style="font-size:13px;color:#6b7280;">${escapeHtml(row.sourceLabel)}</span>`,
+    `<span style="font-size:13px;color:#6b7280;">${escapeHtml(row.sourceLabel)} · ${escapeHtml(row.publishedLabel)}</span>`,
     badge,
     `<span style="display:inline-block;margin-left:8px;padding:2px 8px;font-size:12px;font-weight:600;color:${bandColor};background-color:${bandBg};border-radius:999px;">${row.relevanceBand}</span>`,
     `<span style="font-size:12px;color:#9ca3af;margin-left:6px;">(${row.relevanceScore})</span>`,
@@ -168,7 +170,7 @@ function renderAdminArticleRow(row: AdminDigestArticleRow): string {
     "</tr>",
     "<tr>",
     '<td style="padding-top:8px;">',
-    `<span style="font-size:13px;color:#6b7280;">${escapeHtml(row.sourceLabel)}</span>`,
+    `<span style="font-size:13px;color:#6b7280;">${escapeHtml(row.sourceLabel)} · ${escapeHtml(row.publishedLabel)}</span>`,
     badge,
     `<span style="display:inline-block;margin-left:8px;padding:2px 8px;font-size:12px;font-weight:600;color:${bandColor};background-color:${bandBg};border-radius:999px;">${row.relevanceBand}</span>`,
     `<span style="font-size:12px;color:#9ca3af;margin-left:6px;">Score: ${row.relevanceScore}</span>`,

@@ -37,6 +37,7 @@ type DigestPayload = {
   previewRecipient?: string;
   stats?: {
     articlesProcessed: number;
+    articlesSkippedDedupe: number;
     keywordMatchPairs: number;
     digestEntriesAfterScoring: number;
     emailsSent: number;

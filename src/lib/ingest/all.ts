@@ -6,26 +6,17 @@ import { fetchNzheraldArticles } from "@/lib/sources/nzherald";
 import { fetchRnzArticles } from "@/lib/sources/rnz";
 import { fetchScoopArticles } from "@/lib/sources/scoop";
 import { fetchStuffArticles } from "@/lib/sources/stuff";
+import { normalizeArticleUrl } from "@/lib/util/normalize-url";
 
 type SourceKey = Article["source"];
 
 type IngestErrorMap = Partial<Record<SourceKey, string>>;
 
-function normalizeUrl(url: string): string {
-  try {
-    const u = new URL(url);
-    u.hash = "";
-    return u.href;
-  } catch {
-    return url;
-  }
-}
-
 function dedupeByUrl(articles: Article[]): Article[] {
   const seen = new Set<string>();
   const out: Article[] = [];
   for (const a of articles) {
-    const key = normalizeUrl(a.url);
+    const key = normalizeArticleUrl(a.url);
     if (seen.has(key)) continue;
     seen.add(key);
     out.push(a);

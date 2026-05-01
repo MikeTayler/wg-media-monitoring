@@ -48,3 +48,8 @@ CREATE TABLE IF NOT EXISTS pipeline_status (
   value      jsonb NOT NULL DEFAULT '{}',
   updated_at timestamptz NOT NULL DEFAULT now()
 );
+
+CREATE TABLE IF NOT EXISTS digest_sent_urls (
+  url_norm      text PRIMARY KEY,
+  first_sent_at timestamptz NOT NULL DEFAULT now()
+);

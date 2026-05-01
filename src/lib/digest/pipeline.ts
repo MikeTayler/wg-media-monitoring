@@ -8,7 +8,11 @@ import {
   scoreAndSummariseArticle,
 } from "@/lib/engine/ai-scorer";
 import { matchArticleToEntities } from "@/lib/engine/keywords";
-import { renderDigestHtml, scoreToRelevanceBand } from "@/lib/email/template";
+import {
+  renderDigestHtml,
+  renderEmptyDigestHtml,
+  scoreToRelevanceBand,
+} from "@/lib/email/template";
 import { renderAdminDigestHtml } from "@/lib/email/template";
 import type {
   DigestArticleRow,
@@ -17,8 +21,14 @@ import type {
   AdminDigestArticleRow,
 } from "@/lib/email/template";
 import { sendDigestEmail } from "@/lib/email/sender";
+import {
+  loadSentDigestNormalizedUrls,
+  recordDigestSentUrls,
+  uniqueNormalizeUrls,
+} from "@/lib/digest/sent-urls";
 import { query, ensureTablesExist } from "@/lib/db";
 import type { Article, Entity } from "@/lib/types";
+import { normalizeArticleUrl } from "@/lib/util/normalize-url";
 
 export type ScoredDigestEntry = {
   entityId: string;
@@ -37,6 +47,16 @@ const SOURCE_LABELS: Record<Article["source"], string> = {
   newstalkzb: "Newstalk ZB",
   nzherald: "NZ Herald",
 };
+
+function formatDigestPublishedDate(publishedAt: Date): string {
+  if (Number.isNaN(publishedAt.getTime())) return "—";
+  return publishedAt.toLocaleDateString("en-NZ", {
+    timeZone: "Pacific/Auckland",
+    day: "numeric",
+    month: "short",
+    year: "numeric",
+  });
+}
 
 export async function loadArticlesFromStore(): Promise<Article[]> {
   await ensureTablesExist();
@@ -108,6 +128,7 @@ export function buildSectionsForRecipient(
       title: row.article.title,
       url: row.article.url,
       sourceLabel: SOURCE_LABELS[row.article.source],
+      publishedLabel: formatDigestPublishedDate(row.article.publishedAt),
       paywalled: row.article.paywalled,
       relevanceBand: scoreToRelevanceBand(row.relevanceScore),
       relevanceScore: row.relevanceScore,
@@ -142,6 +163,7 @@ export function buildAdminSections(
       title: row.article.title,
       url: row.article.url,
       sourceLabel: SOURCE_LABELS[row.article.source],
+      publishedLabel: formatDigestPublishedDate(row.article.publishedAt),
       paywalled: row.article.paywalled,
       relevanceBand: scoreToRelevanceBand(row.relevanceScore),
       relevanceScore: row.relevanceScore,
@@ -238,7 +260,10 @@ export async function buildScoredDigestEntries(
 }
 
 export type DigestRunStats = {
+  /** Articles evaluated for scoring (after removing URLs already mailed in a past digest). */
   articlesProcessed: number;
+  /** Articles omitted because their URL already appeared in a digest. */
+  articlesSkippedDedupe: number;
   keywordMatchPairs: number;
   digestEntriesAfterScoring: number;
   emailsSent: number;
@@ -266,6 +291,16 @@ export async function runDigestPipeline(options: {
   dryRun: boolean;
   adminOnly?: boolean;
 }): Promise<DigestRunResult> {
+  const zeroStats = (overrides: Partial<DigestRunStats>): DigestRunStats => ({
+    articlesProcessed: 0,
+    articlesSkippedDedupe: 0,
+    keywordMatchPairs: 0,
+    digestEntriesAfterScoring: 0,
+    emailsSent: 0,
+    recipientsTargeted: 0,
+    ...overrides,
+  });
+
   let articles: Article[];
   try {
     articles = await loadArticlesFromStore();
@@ -276,13 +311,7 @@ export async function runDigestPipeline(options: {
       dryRun: options.dryRun,
       adminOnly: options.adminOnly === true,
       error: `Could not load articles: ${message}`,
-      stats: {
-        articlesProcessed: 0,
-        keywordMatchPairs: 0,
-        digestEntriesAfterScoring: 0,
-        emailsSent: 0,
-        recipientsTargeted: 0,
-      },
+      stats: zeroStats({}),
     };
   }
 
@@ -293,13 +322,87 @@ export async function runDigestPipeline(options: {
       dryRun: options.dryRun,
       adminOnly: options.adminOnly === true,
       error: "No articles found. Run ingest first.",
-      stats: {
-        articlesProcessed: 0,
-        keywordMatchPairs: 0,
-        digestEntriesAfterScoring: 0,
-        emailsSent: 0,
-        recipientsTargeted: 0,
-      },
+      stats: zeroStats({}),
+    };
+  }
+
+  let articlesSkippedDedupe = 0;
+  try {
+    const sentSet = await loadSentDigestNormalizedUrls();
+    const beforeDedupe = articles.length;
+    articles = articles.filter((a) => !sentSet.has(normalizeArticleUrl(a.url)));
+    articlesSkippedDedupe = beforeDedupe - articles.length;
+    if (articlesSkippedDedupe > 0) {
+      console.log(
+        `[digest] Skipped ${articlesSkippedDedupe} article(s) (URL already appeared in a past digest)`
+      );
+    }
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    return {
+      ok: false,
+      dryRun: options.dryRun,
+      adminOnly: options.adminOnly === true,
+      error: `Could not load digest sent-url ledger: ${message}`,
+      stats: zeroStats({}),
+    };
+  }
+
+  const adminOnlyFlag = options.adminOnly === true;
+
+  if (articles.length === 0) {
+    console.warn(
+      "[digest] All articles in store were already included in previous digests; skipping send."
+    );
+    if (adminOnlyFlag) {
+      const adminEmails = await getAdminRecipientEmails();
+      const recipientsTargeted = adminEmails.length;
+      if (options.dryRun && adminEmails.length > 0) {
+        return {
+          ok: true,
+          dryRun: true,
+          adminOnly: true,
+          previewHtml: renderEmptyDigestHtml(),
+          previewRecipient: adminEmails[0],
+          stats: zeroStats({
+            articlesSkippedDedupe,
+            recipientsTargeted,
+          }),
+        };
+      }
+      return {
+        ok: true,
+        dryRun: options.dryRun,
+        adminOnly: true,
+        stats: zeroStats({
+          articlesSkippedDedupe,
+          recipientsTargeted,
+        }),
+      };
+    }
+
+    const recipients = await getEntityRecipientEmails();
+    const recipientsTargeted = recipients.length;
+    if (options.dryRun && recipients.length > 0) {
+      return {
+        ok: true,
+        dryRun: true,
+        previewHtml: renderEmptyDigestHtml(),
+        previewRecipient: recipients[0],
+        stats: zeroStats({
+          articlesSkippedDedupe,
+          recipientsTargeted,
+        }),
+      };
+    }
+
+    return {
+      ok: true,
+      dryRun: options.dryRun,
+      stats: zeroStats({
+        articlesSkippedDedupe,
+        recipientsTargeted,
+      }),
     };
   }
 
@@ -311,9 +414,14 @@ export async function runDigestPipeline(options: {
 
   const digestEntriesAfterScoring = scoredEntries.length;
 
-  const adminOnly = options.adminOnly === true;
+  const scoredStats = {
+    articlesProcessed,
+    articlesSkippedDedupe,
+    keywordMatchPairs,
+    digestEntriesAfterScoring,
+  } satisfies Omit<DigestRunStats, "emailsSent" | "recipientsTargeted">;
 
-  if (adminOnly) {
+  if (adminOnlyFlag) {
     const adminEmails = await getAdminRecipientEmails();
     const recipientsTargeted = adminEmails.length;
 
@@ -323,7 +431,11 @@ export async function runDigestPipeline(options: {
         ok: true,
         dryRun: options.dryRun,
         adminOnly: true,
-        stats: { articlesProcessed, keywordMatchPairs, digestEntriesAfterScoring, emailsSent: 0, recipientsTargeted: 0 },
+        stats: {
+          ...scoredStats,
+          emailsSent: 0,
+          recipientsTargeted: 0,
+        },
       };
     }
 
@@ -332,7 +444,7 @@ export async function runDigestPipeline(options: {
 
     if (options.dryRun) {
       console.log(
-        `[digest] dry_run admin: articles=${articlesProcessed}, keywordPairs=${keywordMatchPairs}, scoredEntries=${digestEntriesAfterScoring}, previewRecipient=${adminEmails[0]}`
+        `[digest] dry_run admin: articles=${articlesProcessed}, skippedDedupe=${articlesSkippedDedupe}, keywordPairs=${keywordMatchPairs}, scoredEntries=${digestEntriesAfterScoring}, previewRecipient=${adminEmails[0]}`
       );
       return {
         ok: true,
@@ -340,7 +452,11 @@ export async function runDigestPipeline(options: {
         adminOnly: true,
         previewHtml: adminHtml,
         previewRecipient: adminEmails[0],
-        stats: { articlesProcessed, keywordMatchPairs, digestEntriesAfterScoring, emailsSent: 0, recipientsTargeted },
+        stats: {
+          ...scoredStats,
+          emailsSent: 0,
+          recipientsTargeted,
+        },
       };
     }
 
@@ -351,19 +467,28 @@ export async function runDigestPipeline(options: {
       if (result.ok) emailsSent++;
     }
 
+    const urlsRecorded = uniqueNormalizeUrls(
+      scoredEntries.map((e) => e.article.url)
+    );
+    if (emailsSent > 0 && urlsRecorded.length > 0) {
+      await recordDigestSentUrls(urlsRecorded);
+    }
+
     console.log(
-      `[digest] Sent admin: articles=${articlesProcessed}, scoredEntries=${digestEntriesAfterScoring}, emailsSent=${emailsSent}/${adminEmails.length}`
+      `[digest] Sent admin: articles=${articlesProcessed}, skippedDedupe=${articlesSkippedDedupe}, scoredEntries=${digestEntriesAfterScoring}, emailsSent=${emailsSent}/${adminEmails.length}`
     );
 
     return {
       ok: true,
       dryRun: false,
       adminOnly: true,
-      stats: { articlesProcessed, keywordMatchPairs, digestEntriesAfterScoring, emailsSent, recipientsTargeted },
+      stats: {
+        ...scoredStats,
+        emailsSent,
+        recipientsTargeted,
+      },
     };
   }
-
-  /* ── Cron mode: per-entity filtered digests to entity recipients ── */
 
   const recipients = await getEntityRecipientEmails();
   const recipientsTargeted = recipients.length;
@@ -373,7 +498,11 @@ export async function runDigestPipeline(options: {
     return {
       ok: true,
       dryRun: options.dryRun,
-      stats: { articlesProcessed, keywordMatchPairs, digestEntriesAfterScoring, emailsSent: 0, recipientsTargeted: 0 },
+      stats: {
+        ...scoredStats,
+        emailsSent: 0,
+        recipientsTargeted: 0,
+      },
     };
   }
 
@@ -386,7 +515,7 @@ export async function runDigestPipeline(options: {
     const previewHtml = renderDigestHtml(sections);
 
     console.log(
-      `[digest] dry_run: articles=${articlesProcessed}, keywordPairs=${keywordMatchPairs}, scoredEntries=${digestEntriesAfterScoring}, previewRecipient=${previewRecipient}`
+      `[digest] dry_run: articles=${articlesProcessed}, skippedDedupe=${articlesSkippedDedupe}, keywordPairs=${keywordMatchPairs}, scoredEntries=${digestEntriesAfterScoring}, previewRecipient=${previewRecipient}`
     );
 
     return {
@@ -394,26 +523,45 @@ export async function runDigestPipeline(options: {
       dryRun: true,
       previewHtml,
       previewRecipient,
-      stats: { articlesProcessed, keywordMatchPairs, digestEntriesAfterScoring, emailsSent: 0, recipientsTargeted },
+      stats: {
+        ...scoredStats,
+        emailsSent: 0,
+        recipientsTargeted,
+      },
     };
   }
 
   let emailsSent = 0;
+  const normsToMark: string[] = [];
   for (const email of recipients) {
     const filtered = filterEntriesForRecipient(email, scoredEntries, entities);
     const sections = buildSectionsForRecipient(filtered, entities);
     const html = renderDigestHtml(sections);
     const result = await sendDigestEmail({ to: email, subject, html });
-    if (result.ok) emailsSent++;
+    if (result.ok) {
+      emailsSent++;
+      for (const e of filtered) {
+        normsToMark.push(normalizeArticleUrl(e.article.url));
+      }
+    }
+  }
+
+  const urlsRecorded = uniqueNormalizeUrls(normsToMark);
+  if (urlsRecorded.length > 0) {
+    await recordDigestSentUrls(urlsRecorded);
   }
 
   console.log(
-    `[digest] Sent: articles=${articlesProcessed}, keywordPairs=${keywordMatchPairs}, scoredEntries=${digestEntriesAfterScoring}, emailsSent=${emailsSent}/${recipients.length}`
+    `[digest] Sent: articles=${articlesProcessed}, skippedDedupe=${articlesSkippedDedupe}, keywordPairs=${keywordMatchPairs}, scoredEntries=${digestEntriesAfterScoring}, emailsSent=${emailsSent}/${recipients.length}`
   );
 
   return {
     ok: true,
     dryRun: false,
-    stats: { articlesProcessed, keywordMatchPairs, digestEntriesAfterScoring, emailsSent, recipientsTargeted },
+    stats: {
+      ...scoredStats,
+      emailsSent,
+      recipientsTargeted,
+    },
   };
 }

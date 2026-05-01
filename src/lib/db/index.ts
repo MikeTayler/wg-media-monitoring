@@ -43,7 +43,7 @@ export async function query<T extends Record<string, unknown> = Record<string, u
 let _tablesEnsured = false;
 
 /**
- * Creates the articles and pipeline_status tables if they don't exist.
+ * Creates articles, digest_sent_urls, pipeline_status tables if absent.
  * Called at the start of ingest and digest to guarantee the schema is present.
  * Runs once per process lifetime (cached via module-level flag).
  */
@@ -69,6 +69,12 @@ export async function ensureTablesExist(): Promise<void> {
       key        text PRIMARY KEY,
       value      jsonb NOT NULL DEFAULT '{}',
       updated_at timestamptz NOT NULL DEFAULT now()
+    )
+  `);
+  await query(`
+    CREATE TABLE IF NOT EXISTS digest_sent_urls (
+      url_norm     text PRIMARY KEY,
+      first_sent_at timestamptz NOT NULL DEFAULT now()
     )
   `);
   _tablesEnsured = true;
