@@ -1,10 +1,11 @@
 import type { Article, Entity } from "@/lib/types";
 import {
+  hasGatewayApiKey,
   postChatCompletion,
   RELEVANCE_DISCARD_BELOW,
   truncateForModel,
   WISE_GROUP_MONITORING_CONTEXT,
-} from "@/lib/engine/openrouter-client";
+} from "@/lib/engine/ai-gateway-client";
 
 /** Default score when the API fails or the response cannot be parsed (project.md). */
 export const DEFAULT_RELEVANCE_SCORE = 50;
@@ -27,14 +28,16 @@ export type RelevanceScoreResult = {
 };
 
 /**
- * Relevance scoring via OpenRouter (Claude Haiku).
+ * Relevance scoring via Vercel AI Gateway (Claude Haiku).
  * Call only after keyword pre-filter — do not send the full ingest set here.
  */
 export async function scoreArticleRelevance(
   input: ScoreArticleInput
 ): Promise<RelevanceScoreResult> {
-  if (!process.env.OPENROUTER_API_KEY) {
-    console.error("[ai-scorer] OPENROUTER_API_KEY is not set");
+  if (!hasGatewayApiKey()) {
+    console.error(
+      "[ai-scorer] AI_GATEWAY_API_KEY is not set (or legacy OPENROUTER_API_KEY)"
+    );
     return {
       score: DEFAULT_RELEVANCE_SCORE,
       reason: "Relevance scoring unavailable (API key missing).",
@@ -83,7 +86,7 @@ Respond with a single JSON object exactly in this shape (numbers 0–100):
     };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    console.error("[ai-scorer] OpenRouter call failed:", message);
+    console.error("[ai-scorer] AI Gateway call failed:", message);
     return {
       score: DEFAULT_RELEVANCE_SCORE,
       reason: "Relevance could not be scored automatically; default score applied.",
@@ -144,15 +147,17 @@ export type ScoreAndSummaryResult = {
 };
 
 /**
- * Combined relevance scoring + summarisation in a single OpenRouter call.
+ * Combined relevance scoring + summarisation in a single AI Gateway call.
  * Halves API round-trips vs calling scoreArticleRelevance + summariseArticle separately.
  * If score < RELEVANCE_DISCARD_BELOW, summary will be empty string.
  */
 export async function scoreAndSummariseArticle(
   input: ScoreArticleInput
 ): Promise<ScoreAndSummaryResult> {
-  if (!process.env.OPENROUTER_API_KEY) {
-    console.error("[ai-scorer] OPENROUTER_API_KEY is not set");
+  if (!hasGatewayApiKey()) {
+    console.error(
+      "[ai-scorer] AI_GATEWAY_API_KEY is not set (or legacy OPENROUTER_API_KEY)"
+    );
     return {
       score: DEFAULT_RELEVANCE_SCORE,
       reason: "Relevance scoring unavailable (API key missing).",
@@ -209,7 +214,7 @@ Rules:
     };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    console.error("[ai-scorer] OpenRouter call failed:", message);
+    console.error("[ai-scorer] AI Gateway call failed:", message);
     return {
       score: DEFAULT_RELEVANCE_SCORE,
       reason: "Relevance could not be scored automatically; default score applied.",

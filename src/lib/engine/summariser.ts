@@ -1,10 +1,11 @@
 import type { Article } from "@/lib/types";
 import {
+  hasGatewayApiKey,
   postChatCompletion,
   RELEVANCE_DISCARD_BELOW,
   truncateForModel,
   WISE_GROUP_MONITORING_CONTEXT,
-} from "@/lib/engine/openrouter-client";
+} from "@/lib/engine/ai-gateway-client";
 
 /** Summaries are only generated for articles at or above this relevance score. */
 export const SUMMARY_RELEVANCE_THRESHOLD = RELEVANCE_DISCARD_BELOW;
@@ -19,7 +20,7 @@ export function clearSummaryCache(): void {
 }
 
 /**
- * 1–2 sentence factual summary via OpenRouter. Only runs when `relevanceScore` ≥ threshold.
+ * 1–2 sentence factual summary via Vercel AI Gateway. Only runs when `relevanceScore` ≥ threshold.
  * NZ Herald (`paywalled`): uses title + body only (body is RSS description).
  */
 export async function summariseArticle(
@@ -35,8 +36,10 @@ export async function summariseArticle(
     return cached;
   }
 
-  if (!process.env.OPENROUTER_API_KEY) {
-    console.error("[summariser] OPENROUTER_API_KEY is not set");
+  if (!hasGatewayApiKey()) {
+    console.error(
+      "[summariser] AI_GATEWAY_API_KEY is not set (or legacy OPENROUTER_API_KEY)"
+    );
     return "";
   }
 
@@ -67,7 +70,7 @@ Write 1–2 short sentences summarising the article for colleagues. Be factual a
     return summary;
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    console.error("[summariser] OpenRouter call failed:", message);
+    console.error("[summariser] AI Gateway call failed:", message);
     return "";
   }
 }
