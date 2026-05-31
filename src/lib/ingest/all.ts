@@ -40,12 +40,29 @@ export type IngestAllResult = {
   errors: IngestErrorMap;
 };
 
+/** Live progress events emitted during ingestion (consumed by the streaming route). */
+export type IngestProgressEvent =
+  | { type: "source_start"; source: SourceKey }
+  | { type: "source_done"; source: SourceKey; count: number; totalSoFar: number }
+  | { type: "source_error"; source: SourceKey; message: string; totalSoFar: number }
+  | { type: "fetched"; totalUnique: number }
+  | { type: "enrich_start"; total: number }
+  | { type: "enrich_progress"; current: number; total: number }
+  | { type: "writing"; count: number };
+
+export type IngestAllOptions = {
+  onProgress?: (event: IngestProgressEvent) => void;
+};
+
 /**
  * Fetches all PoC RSS sources, deduplicates by URL, writes articles to the
  * Neon `articles` table. Per-source failures are logged and recorded in
  * `errors`; other sources still run.
+ *
+ * Pass `onProgress` to receive live progress events.
  */
-export async function ingestAll(): Promise<IngestAllResult> {
+export async function ingestAll(options: IngestAllOptions = {}): Promise<IngestAllResult> {
+  const emit = options.onProgress ?? (() => {});
   await ensureTablesExist();
 
   const bySource: Record<SourceKey, number> = {
@@ -67,25 +84,31 @@ export async function ingestAll(): Promise<IngestAllResult> {
   ];
 
   for (const { key, fn } of tasks) {
+    emit({ type: "source_start", source: key });
     try {
       const items = await fn();
       bySource[key] = items.length;
       combined.push(...items);
+      emit({ type: "source_done", source: key, count: items.length, totalSoFar: combined.length });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       console.error(`[ingest] Source "${key}" failed:`, message);
       errors[key] = message;
+      emit({ type: "source_error", source: key, message, totalSoFar: combined.length });
     }
   }
 
   const unique = dedupeByUrl(combined);
+  emit({ type: "fetched", totalUnique: unique.length });
 
   let fullTextEnriched = 0;
   let fullTextFallback = 0;
   const nonPaywalled = unique.filter((a) => !a.paywalled);
+  emit({ type: "enrich_start", total: nonPaywalled.length });
 
   for (let i = 0; i < nonPaywalled.length; i++) {
     const article = nonPaywalled[i];
+    emit({ type: "enrich_progress", current: i + 1, total: nonPaywalled.length });
     try {
       const text = await fetchFullText(article.url);
       if (text && text.length > article.body.length) {
@@ -113,6 +136,7 @@ export async function ingestAll(): Promise<IngestAllResult> {
 
   const updatedAt = new Date().toISOString();
   const batchId = updatedAt;
+  emit({ type: "writing", count: unique.length });
 
   // Delete articles from previous batches, then upsert the current batch.
   await query("DELETE FROM articles WHERE batch_id != $1", [batchId]);

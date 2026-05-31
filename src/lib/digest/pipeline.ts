@@ -2,6 +2,7 @@ import {
   getEntities,
   getEntityRecipientEmails,
   getAdminRecipientEmails,
+  getRelevanceThreshold,
 } from "@/lib/config";
 import {
   RELEVANCE_DISCARD_BELOW,
@@ -26,9 +27,14 @@ import {
   recordDigestSentUrls,
   uniqueNormalizeUrls,
 } from "@/lib/digest/sent-urls";
+import {
+  recordDigestRunEntityCounts,
+  type DigestRunEntityCount,
+} from "@/lib/digest/run-log";
 import { query, ensureTablesExist } from "@/lib/db";
 import type { Article, Entity } from "@/lib/types";
 import { normalizeArticleUrl } from "@/lib/util/normalize-url";
+import { formatNzDate } from "@/lib/util/format-date";
 
 export type ScoredDigestEntry = {
   entityId: string;
@@ -49,13 +55,7 @@ const SOURCE_LABELS: Record<Article["source"], string> = {
 };
 
 function formatDigestPublishedDate(publishedAt: Date): string {
-  if (Number.isNaN(publishedAt.getTime())) return "—";
-  return publishedAt.toLocaleDateString("en-NZ", {
-    timeZone: "Pacific/Auckland",
-    day: "numeric",
-    month: "short",
-    year: "numeric",
-  });
+  return formatNzDate(publishedAt);
 }
 
 export async function loadArticlesFromStore(): Promise<Article[]> {
@@ -85,6 +85,15 @@ export async function loadArticlesFromStore(): Promise<Article[]> {
 
 function entityById(entities: Entity[], id: string) {
   return entities.find((e) => e.id === id);
+}
+
+/** Count scored entries per entity name (for the digest run log). */
+function countEntriesByEntity(entries: ScoredDigestEntry[]): DigestRunEntityCount[] {
+  const m = new Map<string, number>();
+  for (const e of entries) {
+    m.set(e.entityName, (m.get(e.entityName) ?? 0) + 1);
+  }
+  return Array.from(m, ([entityName, articleCount]) => ({ entityName, articleCount }));
 }
 
 export function recipientSubscribedToEntity(
@@ -178,11 +187,7 @@ export function buildAdminSections(
 }
 
 export function digestEmailSubject(): string {
-  const d = new Date();
-  const dateStr = d.toLocaleDateString("en-NZ", {
-    timeZone: "Pacific/Auckland",
-  });
-  return `Wise Group Media Monitor — Daily digest (${dateStr})`;
+  return `Wise Group Media Monitor — Daily digest (${formatNzDate(new Date())})`;
 }
 
 const CONCURRENCY = 10;
@@ -193,7 +198,8 @@ const CONCURRENCY = 10;
  */
 export async function buildScoredDigestEntries(
   articles: Article[],
-  entities: Entity[]
+  entities: Entity[],
+  discardBelow: number = RELEVANCE_DISCARD_BELOW
 ): Promise<{ entries: ScoredDigestEntry[]; keywordMatchPairs: number }> {
   // Step 1: Collect all keyword match pairs upfront
   const matchPairs: Array<{
@@ -222,18 +228,21 @@ export async function buildScoredDigestEntries(
         const entity = entityById(entities, pair.entityId);
         if (!entity) return null;
 
-        const { score, reason, summary } = await scoreAndSummariseArticle({
-          article: {
-            title: pair.article.title,
-            body: pair.article.body,
-            source: pair.article.source,
-            url: pair.article.url,
-            paywalled: pair.article.paywalled,
+        const { score, reason, summary } = await scoreAndSummariseArticle(
+          {
+            article: {
+              title: pair.article.title,
+              body: pair.article.body,
+              source: pair.article.source,
+              url: pair.article.url,
+              paywalled: pair.article.paywalled,
+            },
+            entity: { name: entity.name, keywords: entity.keywords, description: entity.description ?? "" },
           },
-          entity: { name: entity.name, keywords: entity.keywords, description: entity.description ?? "" },
-        });
+          discardBelow
+        );
 
-        if (score < RELEVANCE_DISCARD_BELOW) return null;
+        if (score < discardBelow) return null;
 
         return {
           entityId: entity.id,
@@ -300,6 +309,9 @@ export async function runDigestPipeline(options: {
     recipientsTargeted: 0,
     ...overrides,
   });
+
+  // Tags every URL recorded by this run so it can be rolled back individually.
+  const runId = new Date().toISOString();
 
   let articles: Article[];
   try {
@@ -408,9 +420,10 @@ export async function runDigestPipeline(options: {
 
   const articlesProcessed = articles.length;
   const entities = await getEntities();
+  const relevanceThreshold = await getRelevanceThreshold();
 
   const { entries: scoredEntries, keywordMatchPairs } =
-    await buildScoredDigestEntries(articles, entities);
+    await buildScoredDigestEntries(articles, entities, relevanceThreshold);
 
   const digestEntriesAfterScoring = scoredEntries.length;
 
@@ -467,11 +480,26 @@ export async function runDigestPipeline(options: {
       if (result.ok) emailsSent++;
     }
 
+    // Only poison the dedupe ledger when the run fully succeeded, so a failed
+    // or partial send can be retried after re-ingesting.
+    const allDelivered = emailsSent === adminEmails.length;
     const urlsRecorded = uniqueNormalizeUrls(
       scoredEntries.map((e) => e.article.url)
     );
-    if (emailsSent > 0 && urlsRecorded.length > 0) {
-      await recordDigestSentUrls(urlsRecorded);
+    if (allDelivered && urlsRecorded.length > 0) {
+      await recordDigestSentUrls(urlsRecorded, runId);
+    } else if (!allDelivered) {
+      console.warn(
+        `[digest] Partial admin send (${emailsSent}/${adminEmails.length}); dedupe ledger not updated so the run can be retried.`
+      );
+    }
+
+    if (emailsSent > 0) {
+      try {
+        await recordDigestRunEntityCounts(runId, "admin", countEntriesByEntity(scoredEntries));
+      } catch (logErr) {
+        console.error("[digest] Failed to record run log:", logErr);
+      }
     }
 
     console.log(
@@ -546,9 +574,24 @@ export async function runDigestPipeline(options: {
     }
   }
 
+  // Only poison the dedupe ledger when every targeted recipient was delivered,
+  // so a failed or partial send can be retried after re-ingesting.
+  const allDelivered = emailsSent === recipients.length;
   const urlsRecorded = uniqueNormalizeUrls(normsToMark);
-  if (urlsRecorded.length > 0) {
-    await recordDigestSentUrls(urlsRecorded);
+  if (allDelivered && urlsRecorded.length > 0) {
+    await recordDigestSentUrls(urlsRecorded, runId);
+  } else if (!allDelivered) {
+    console.warn(
+      `[digest] Partial entity send (${emailsSent}/${recipients.length}); dedupe ledger not updated so the run can be retried.`
+    );
+  }
+
+  if (emailsSent > 0) {
+    try {
+      await recordDigestRunEntityCounts(runId, "entity", countEntriesByEntity(scoredEntries));
+    } catch (logErr) {
+      console.error("[digest] Failed to record run log:", logErr);
+    }
   }
 
   console.log(

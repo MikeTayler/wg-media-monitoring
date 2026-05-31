@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState, type CSSProperties } from "react";
+import { formatNzDateTime } from "@/lib/util/format-date";
 
 const CRON_SECRET_SESSION_KEY = "wg-media-monitor-cron-secret";
 
@@ -29,6 +30,29 @@ type IngestPayload = {
   error?: string;
 };
 
+type IngestStreamEvent =
+  | { type: "source_start"; source: string }
+  | { type: "source_done"; source: string; count: number; totalSoFar: number }
+  | { type: "source_error"; source: string; message: string; totalSoFar: number }
+  | { type: "fetched"; totalUnique: number }
+  | { type: "enrich_start"; total: number }
+  | { type: "enrich_progress"; current: number; total: number }
+  | { type: "writing"; count: number }
+  | { type: "done"; result: IngestPayload }
+  | { type: "error"; error: string };
+
+type IngestSourceStatus = "pending" | "active" | "done" | "error";
+
+type IngestProgressState = {
+  phase: "fetching" | "enriching" | "writing" | "done" | "error";
+  currentSource: string | null;
+  sources: Record<string, { status: IngestSourceStatus; count?: number; message?: string }>;
+  totalFetched: number;
+  totalUnique: number | null;
+  enrichCurrent: number;
+  enrichTotal: number;
+};
+
 type DigestPayload = {
   ok?: boolean;
   dryRun?: boolean;
@@ -44,6 +68,23 @@ type DigestPayload = {
     recipientsTargeted: number;
   };
   error?: string;
+};
+
+type DigestRunLogGroup = {
+  runId: string;
+  runAt: string;
+  mode: string;
+  totalArticles: number;
+  entities: Array<{ entityName: string; articleCount: number }>;
+};
+
+type DedupeStatsPayload = {
+  total: number;
+  activeWithinWindow: number;
+  windowDays: number;
+  lastRunId: string | null;
+  lastRunCount: number;
+  lastSentAt: string | null;
 };
 
 type SettingsMap = Record<string, string>;
@@ -160,6 +201,14 @@ const sectionHeaderBtn: CSSProperties = {
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const ADMIN_KEY = "__admin__";
 
+const INGEST_SOURCES: Array<{ key: string; label: string }> = [
+  { key: "stuff", label: "Stuff" },
+  { key: "rnz", label: "RNZ" },
+  { key: "scoop", label: "Scoop" },
+  { key: "newstalkzb", label: "Newstalk ZB" },
+  { key: "nzherald", label: "NZ Herald" },
+];
+
 function authParams(secret: string) {
   return new URLSearchParams({ secret: secret.trim() });
 }
@@ -254,6 +303,7 @@ export default function AdminDashboardPage() {
   /* --- Ingest --- */
   const [ingestLoading, setIngestLoading] = useState(false);
   const [ingestResult, setIngestResult] = useState<IngestPayload | null>(null);
+  const [ingestProgress, setIngestProgress] = useState<IngestProgressState | null>(null);
 
   /* --- Digest --- */
   const [previewLoading, setPreviewLoading] = useState(false);
@@ -262,6 +312,18 @@ export default function AdminDashboardPage() {
   const [previewError, setPreviewError] = useState<string | null>(null);
   const [sendLoading, setSendLoading] = useState(false);
   const [sendResult, setSendResult] = useState<DigestPayload | null>(null);
+
+  /* --- Digest run log --- */
+  const [runLog, setRunLog] = useState<DigestRunLogGroup[] | null>(null);
+  const [runLogLoading, setRunLogLoading] = useState(false);
+  const [runLogError, setRunLogError] = useState<string | null>(null);
+
+  /* --- Dedupe ledger --- */
+  const [dedupeStats, setDedupeStats] = useState<DedupeStatsPayload | null>(null);
+  const [dedupeLoading, setDedupeLoading] = useState(false);
+  const [dedupeError, setDedupeError] = useState<string | null>(null);
+  const [dedupeBusy, setDedupeBusy] = useState<"all" | "last" | null>(null);
+  const [dedupeMsg, setDedupeMsg] = useState<string | null>(null);
 
   /* --- Cron settings --- */
   const [settings, setSettings] = useState<SettingsMap | null>(null);
@@ -272,6 +334,7 @@ export default function AdminDashboardPage() {
   const [ingestTime, setIngestTime] = useState("05:45");
   const [digestTime, setDigestTime] = useState("06:30");
   const [cronTimezone, setCronTimezone] = useState("Pacific/Auckland");
+  const [relevanceThreshold, setRelevanceThreshold] = useState(40);
 
   /* --- Entity config (keywords + descriptions + entity recipients) --- */
   const [entityConfigs, setEntityConfigs] = useState<DbEntityConfig[] | null>(null);
@@ -359,6 +422,8 @@ export default function AdminDashboardPage() {
       setIngestTime(s.cron_ingest_time ?? "05:45");
       setDigestTime(s.cron_digest_time ?? "06:30");
       setCronTimezone(s.cron_timezone ?? "Pacific/Auckland");
+      const rt = Number(s.relevance_threshold);
+      setRelevanceThreshold(Number.isFinite(rt) ? Math.min(100, Math.max(0, Math.round(rt))) : 40);
     } catch (e) {
       setSettingsError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -377,7 +442,11 @@ export default function AdminDashboardPage() {
         body: JSON.stringify({ key, value }),
       });
       const data = (await res.json()) as { ok: boolean; error?: string };
-      if (!res.ok || !data.ok) setSettingsError(data.error ?? `HTTP ${res.status}`);
+      if (!res.ok || !data.ok) {
+        setSettingsError(data.error ?? `HTTP ${res.status}`);
+      } else {
+        setSettings((prev) => (prev ? { ...prev, [key]: value } : prev));
+      }
     } catch (e) {
       setSettingsError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -605,17 +674,102 @@ export default function AdminDashboardPage() {
   /*  Ingest                                                           */
   /* ---------------------------------------------------------------- */
 
+  const applyIngestEvent = (event: IngestStreamEvent) => {
+    switch (event.type) {
+      case "source_start":
+        setIngestProgress((p) => p && ({
+          ...p,
+          phase: "fetching",
+          currentSource: event.source,
+          sources: { ...p.sources, [event.source]: { ...p.sources[event.source], status: "active" } },
+        }));
+        break;
+      case "source_done":
+        setIngestProgress((p) => p && ({
+          ...p,
+          totalFetched: event.totalSoFar,
+          currentSource: null,
+          sources: { ...p.sources, [event.source]: { status: "done", count: event.count } },
+        }));
+        break;
+      case "source_error":
+        setIngestProgress((p) => p && ({
+          ...p,
+          totalFetched: event.totalSoFar,
+          currentSource: null,
+          sources: { ...p.sources, [event.source]: { status: "error", message: event.message } },
+        }));
+        break;
+      case "fetched":
+        setIngestProgress((p) => p && ({ ...p, totalUnique: event.totalUnique }));
+        break;
+      case "enrich_start":
+        setIngestProgress((p) => p && ({ ...p, phase: "enriching", enrichTotal: event.total, enrichCurrent: 0 }));
+        break;
+      case "enrich_progress":
+        setIngestProgress((p) => p && ({ ...p, phase: "enriching", enrichCurrent: event.current, enrichTotal: event.total }));
+        break;
+      case "writing":
+        setIngestProgress((p) => p && ({ ...p, phase: "writing" }));
+        break;
+      case "done":
+        setIngestProgress((p) => p && ({ ...p, phase: "done" }));
+        setIngestResult(event.result);
+        loadStatus();
+        break;
+      case "error":
+        setIngestProgress((p) => p && ({ ...p, phase: "error" }));
+        setIngestResult({ error: event.error });
+        break;
+    }
+  };
+
   const runIngest = async () => {
     if (!cronSecret.trim()) { setIngestResult({ error: "Enter CRON_SECRET first." }); return; }
     setIngestLoading(true);
     setIngestResult(null);
+    setIngestProgress({
+      phase: "fetching",
+      currentSource: null,
+      sources: Object.fromEntries(
+        INGEST_SOURCES.map((s) => [s.key, { status: "pending" as IngestSourceStatus }])
+      ),
+      totalFetched: 0,
+      totalUnique: null,
+      enrichCurrent: 0,
+      enrichTotal: 0,
+    });
     try {
-      const res = await fetch(`/api/ingest?${authParams(cronSecret)}`, { method: "GET" });
-      const data = (await res.json()) as IngestPayload;
-      setIngestResult(data);
-      await loadStatus();
+      const res = await fetch(`/api/ingest/stream?${authParams(cronSecret)}`, { cache: "no-store" });
+      if (!res.ok || !res.body) {
+        let msg = `HTTP ${res.status}`;
+        try { const j = (await res.json()) as { error?: string }; msg = j.error ?? msg; } catch { /* ignore */ }
+        setIngestResult({ error: msg });
+        setIngestProgress((p) => p && ({ ...p, phase: "error" }));
+        return;
+      }
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const chunks = buffer.split("\n\n");
+        buffer = chunks.pop() ?? "";
+        for (const chunk of chunks) {
+          const dataLine = chunk.split("\n").find((l) => l.startsWith("data:"));
+          if (!dataLine) continue;
+          const json = dataLine.slice(5).trim();
+          if (!json) continue;
+          try {
+            applyIngestEvent(JSON.parse(json) as IngestStreamEvent);
+          } catch { /* ignore malformed chunk */ }
+        }
+      }
     } catch (e) {
       setIngestResult({ error: e instanceof Error ? e.message : String(e) });
+      setIngestProgress((p) => p && ({ ...p, phase: "error" }));
     } finally {
       setIngestLoading(false);
     }
@@ -661,10 +815,76 @@ export default function AdminDashboardPage() {
       const data = (await res.json()) as DigestPayload;
       setSendResult(data);
       await loadStatus();
+      await loadRunLog();
     } catch (e) {
       setSendResult({ error: e instanceof Error ? e.message : String(e) });
     } finally {
       setSendLoading(false);
+    }
+  };
+
+  /* ---------------------------------------------------------------- */
+  /*  Digest run log                                                   */
+  /* ---------------------------------------------------------------- */
+
+  const loadRunLog = useCallback(async () => {
+    if (!cronSecret.trim()) return;
+    setRunLogLoading(true);
+    setRunLogError(null);
+    try {
+      const res = await fetch(`/api/digest-log?${authParams(cronSecret)}`, { cache: "no-store" });
+      const data = (await res.json()) as { ok: boolean; runs?: DigestRunLogGroup[]; error?: string };
+      if (!res.ok || !data.ok) { setRunLogError(data.error ?? `HTTP ${res.status}`); return; }
+      setRunLog(data.runs ?? []);
+    } catch (e) {
+      setRunLogError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setRunLogLoading(false);
+    }
+  }, [cronSecret]);
+
+  /* ---------------------------------------------------------------- */
+  /*  Dedupe ledger                                                    */
+  /* ---------------------------------------------------------------- */
+
+  const loadDedupeStats = useCallback(async () => {
+    if (!cronSecret.trim()) return;
+    setDedupeLoading(true);
+    setDedupeError(null);
+    try {
+      const res = await fetch(`/api/dedupe?${authParams(cronSecret)}`, { cache: "no-store" });
+      const data = (await res.json()) as { ok: boolean; stats?: DedupeStatsPayload; error?: string };
+      if (!res.ok || !data.ok) { setDedupeError(data.error ?? `HTTP ${res.status}`); return; }
+      setDedupeStats(data.stats ?? null);
+    } catch (e) {
+      setDedupeError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setDedupeLoading(false);
+    }
+  }, [cronSecret]);
+
+  const clearDedupe = async (scope: "all" | "last") => {
+    if (!cronSecret.trim()) return;
+    const confirmMsg =
+      scope === "all"
+        ? "Clear the ENTIRE dedupe ledger? Every article will be eligible for the next digest again."
+        : "Clear the most recent digest run from the dedupe ledger so it can be retried?";
+    if (!window.confirm(confirmMsg)) return;
+    setDedupeBusy(scope);
+    setDedupeError(null);
+    setDedupeMsg(null);
+    try {
+      const q = authParams(cronSecret);
+      q.set("scope", scope);
+      const res = await fetch(`/api/dedupe?${q}`, { method: "DELETE" });
+      const data = (await res.json()) as { ok: boolean; cleared?: number; error?: string };
+      if (!res.ok || !data.ok) { setDedupeError(data.error ?? `HTTP ${res.status}`); return; }
+      setDedupeMsg(`Cleared ${data.cleared ?? 0} URL${(data.cleared ?? 0) === 1 ? "" : "s"} from the ledger.`);
+      await loadDedupeStats();
+    } catch (e) {
+      setDedupeError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setDedupeBusy(null);
     }
   };
 
@@ -713,7 +933,7 @@ export default function AdminDashboardPage() {
           <button
             type="button"
             disabled={!cronSecret.trim() || settingsLoading || entityConfigLoading}
-            onClick={() => { loadSettings(); loadEntityConfig(); loadAdminRecipients(); }}
+            onClick={() => { loadSettings(); loadEntityConfig(); loadAdminRecipients(); loadDedupeStats(); loadRunLog(); }}
             style={{
               ...btnPrimary,
               opacity: cronSecret.trim() ? 1 : 0.5,
@@ -740,15 +960,15 @@ export default function AdminDashboardPage() {
           <p style={{ margin: 0, color: "#b91c1c" }}>{status.error}</p>
         ) : (
           <dl style={{ display: "grid", gap: "0.65rem", margin: 0, fontSize: 14 }}>
-            {[
-              ["Last ingestion", status?.lastIngestionAt, true],
-              ["Article count (last ingest)", status?.articleCount],
-              ["Last digest", status?.lastDigestAt, true],
-            ].map(([label, val, mono]) => (
-              <div key={label as string}>
-                <dt style={{ fontSize: 12, color: "var(--muted)", margin: 0 }}>{label as string}</dt>
-                <dd style={{ margin: "4px 0 0", ...(mono ? { fontFamily: "ui-monospace, monospace" } : {}) }}>
-                  {(val as string | number) ?? "—"}
+            {([
+              ["Last ingestion", status?.lastIngestionAt, "datetime"],
+              ["Article count (last ingest)", status?.articleCount, "number"],
+              ["Last digest", status?.lastDigestAt, "datetime"],
+            ] as Array<[string, string | number | null | undefined, "datetime" | "number"]>).map(([label, val, kind]) => (
+              <div key={label}>
+                <dt style={{ fontSize: 12, color: "var(--muted)", margin: 0 }}>{label}</dt>
+                <dd style={{ margin: "4px 0 0" }}>
+                  {kind === "datetime" ? formatNzDateTime(val as string | null) : ((val as number | null) ?? "—")}
                 </dd>
               </div>
             ))}
@@ -777,7 +997,7 @@ export default function AdminDashboardPage() {
                   <ul style={{ margin: 0, paddingLeft: "1.1rem", fontSize: 13, color: "#374151" }}>
                     {status.recentErrors.map((err, i) => (
                       <li key={`${err.at}-${i}`} style={{ marginBottom: 6 }}>
-                        <span style={{ color: "var(--muted)" }}>{err.at}</span>{" "}
+                        <span style={{ color: "var(--muted)" }}>{formatNzDateTime(err.at)}</span>{" "}
                         <strong>{err.source}</strong>: {err.message}
                       </li>
                     ))}
@@ -894,6 +1114,67 @@ export default function AdminDashboardPage() {
               reference. The actual Vercel cron schedule is a static expression in{" "}
               <code style={{ fontSize: 11 }}>vercel.json</code>; changing it requires a redeployment.
             </p>
+          </>
+        )}
+      </section>
+
+      {/* ============================================================ */}
+      {/*  AI SCORING                                                   */}
+      {/* ============================================================ */}
+
+      <section style={panelStyle}>
+        <h2 style={{ fontSize: "1rem", margin: "0 0 0.25rem 0" }}>AI Scoring</h2>
+        <p style={{ fontSize: 13, color: "var(--muted)", margin: "0 0 0.85rem", lineHeight: 1.5 }}>
+          Minimum relevance score (0–100) an article must reach to be included in a digest.
+          Articles scored below this are discarded and not summarised. Higher = stricter.
+        </p>
+
+        {!settings && !settingsLoading && (
+          <p style={{ margin: 0, color: "var(--muted)", fontSize: 13 }}>
+            Click &ldquo;Load config&rdquo; above to view the scoring threshold.
+          </p>
+        )}
+        {settingsLoading && <p style={{ margin: 0, color: "var(--muted)" }}><Spinner /> Loading…</p>}
+
+        {settings && (
+          <>
+            <div style={{ display: "flex", gap: 14, alignItems: "center", flexWrap: "wrap", maxWidth: "32rem" }}>
+              <input
+                type="range"
+                min={0}
+                max={100}
+                step={1}
+                value={relevanceThreshold}
+                onChange={(e) => setRelevanceThreshold(Number(e.target.value))}
+                style={{ flex: 1, minWidth: "12rem", accentColor: "#2563eb" }}
+              />
+              <input
+                type="number"
+                min={0}
+                max={100}
+                value={relevanceThreshold}
+                onChange={(e) => {
+                  const n = Number(e.target.value);
+                  if (Number.isFinite(n)) setRelevanceThreshold(Math.min(100, Math.max(0, Math.round(n))));
+                }}
+                style={{ ...inputStyle, width: "5rem", textAlign: "center" }}
+              />
+              <button
+                type="button"
+                disabled={settingsSaving === "relevance_threshold"}
+                onClick={() => saveSetting("relevance_threshold", String(relevanceThreshold))}
+                style={{ ...btnPrimary, fontSize: 13, padding: "7px 14px" }}
+              >
+                {settingsSaving === "relevance_threshold" ? <><Spinner size={14} /> Saving…</> : "Save threshold"}
+              </button>
+            </div>
+            {settings.relevance_threshold !== undefined &&
+              String(relevanceThreshold) !== String(settings.relevance_threshold) &&
+              settingsSaving !== "relevance_threshold" && (
+                <p style={{ fontSize: 11, color: "#d97706", margin: "8px 0 0" }}>
+                  Unsaved changes (saved value: {settings.relevance_threshold})
+                </p>
+              )}
           </>
         )}
       </section>
@@ -1206,6 +1487,81 @@ export default function AdminDashboardPage() {
           {ingestLoading && <Spinner />}
           Run ingestion
         </button>
+
+        {ingestProgress && (
+          <div style={{ marginTop: 14, border: "1px solid var(--border)", borderRadius: 8, padding: "12px 14px", background: "#fafafa" }}>
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, flexWrap: "wrap", marginBottom: 10 }}>
+              <span style={{ fontSize: 13, fontWeight: 600, display: "inline-flex", alignItems: "center", gap: 6 }}>
+                {(ingestProgress.phase === "fetching" || ingestProgress.phase === "enriching" || ingestProgress.phase === "writing") && <Spinner size={15} />}
+                {ingestProgress.phase === "fetching" && "Fetching sources…"}
+                {ingestProgress.phase === "enriching" && "Fetching full text…"}
+                {ingestProgress.phase === "writing" && "Saving to database…"}
+                {ingestProgress.phase === "done" && "✓ Ingestion complete"}
+                {ingestProgress.phase === "error" && "✕ Ingestion failed"}
+              </span>
+              <span style={{ fontSize: 13, color: "var(--muted)" }}>
+                <strong style={{ color: "#111827", fontVariantNumeric: "tabular-nums" }}>
+                  {ingestProgress.totalUnique ?? ingestProgress.totalFetched}
+                </strong>{" "}
+                article{(ingestProgress.totalUnique ?? ingestProgress.totalFetched) === 1 ? "" : "s"}
+                {ingestProgress.totalUnique != null ? " (unique)" : " so far"}
+              </span>
+            </div>
+
+            <div style={{ display: "grid", gap: 6 }}>
+              {INGEST_SOURCES.map((s) => {
+                const st = ingestProgress.sources[s.key]?.status ?? "pending";
+                const count = ingestProgress.sources[s.key]?.count;
+                const icon =
+                  st === "done" ? "✓" : st === "error" ? "✕" : st === "active" ? null : "○";
+                const color =
+                  st === "done" ? "#047857" : st === "error" ? "#b91c1c" : st === "active" ? "#2563eb" : "#9ca3af";
+                return (
+                  <div key={s.key} style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13 }}>
+                    <span style={{ width: 16, textAlign: "center", color, flexShrink: 0 }}>
+                      {st === "active" ? <Spinner size={13} /> : icon}
+                    </span>
+                    <span style={{ fontWeight: st === "active" ? 600 : 400, color: st === "pending" ? "var(--muted)" : "#111827" }}>
+                      {s.label}
+                    </span>
+                    {st === "done" && (
+                      <span style={{ color: "var(--muted)", fontVariantNumeric: "tabular-nums" }}>
+                        — {count} item{count === 1 ? "" : "s"}
+                      </span>
+                    )}
+                    {st === "error" && (
+                      <span style={{ color: "#b91c1c", fontSize: 12, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                        — {ingestProgress.sources[s.key]?.message ?? "failed"}
+                      </span>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+
+            {ingestProgress.enrichTotal > 0 && (ingestProgress.phase === "enriching" || ingestProgress.phase === "writing" || ingestProgress.phase === "done") && (
+              <div style={{ marginTop: 12 }}>
+                <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12, color: "var(--muted)", marginBottom: 4 }}>
+                  <span>Full-text enrichment</span>
+                  <span style={{ fontVariantNumeric: "tabular-nums" }}>
+                    {ingestProgress.phase === "enriching" ? ingestProgress.enrichCurrent : ingestProgress.enrichTotal} / {ingestProgress.enrichTotal}
+                  </span>
+                </div>
+                <div style={{ height: 6, borderRadius: 999, background: "#e5e7eb", overflow: "hidden" }}>
+                  <div
+                    style={{
+                      height: "100%",
+                      width: `${ingestProgress.enrichTotal > 0 ? Math.round(((ingestProgress.phase === "enriching" ? ingestProgress.enrichCurrent : ingestProgress.enrichTotal) / ingestProgress.enrichTotal) * 100) : 0}%`,
+                      background: "#2563eb",
+                      transition: "width 0.2s",
+                    }}
+                  />
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
         {ingestResult && (
           <pre style={{
             marginTop: 12, padding: 12, background: "#f9fafb", borderRadius: 6,
@@ -1277,6 +1633,159 @@ export default function AdminDashboardPage() {
           }}>
             {JSON.stringify(sendResult, null, 2)}
           </pre>
+        )}
+      </section>
+
+      {/* ============================================================ */}
+      {/*  DIGEST HISTORY (articles per entity, per send)              */}
+      {/* ============================================================ */}
+
+      <section style={panelStyle}>
+        <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 8, flexWrap: "wrap" }}>
+          <h2 style={{ fontSize: "1rem", margin: "0 0 0.5rem 0" }}>Digest History</h2>
+          {runLog && (
+            <button type="button" onClick={() => loadRunLog()} style={{ ...btnSecondary, fontSize: 12, padding: "4px 10px" }}>
+              {runLogLoading ? <Spinner size={13} /> : "Refresh"}
+            </button>
+          )}
+        </div>
+        <p style={{ fontSize: 13, color: "var(--muted)", margin: "0 0 12px", maxWidth: "44rem", lineHeight: 1.5 }}>
+          Number of articles included in each entity&apos;s digest, grouped by send.
+        </p>
+
+        {!runLog && !runLogLoading && (
+          <p style={{ margin: 0, color: "var(--muted)", fontSize: 13 }}>
+            Click &ldquo;Load config&rdquo; above to view digest history.
+          </p>
+        )}
+        {runLogLoading && !runLog && <p style={{ margin: 0, color: "var(--muted)" }}><Spinner /> Loading…</p>}
+        {runLogError && <p style={{ color: "#b91c1c", fontSize: 13, margin: "0 0 8px" }}>{runLogError}</p>}
+
+        {runLog && runLog.length === 0 && (
+          <p style={{ margin: 0, color: "var(--muted)", fontSize: 13 }}>
+            No digests have been sent yet.
+          </p>
+        )}
+
+        {runLog && runLog.length > 0 && (
+          <div style={{ overflowX: "auto" }}>
+            <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+              <thead>
+                <tr style={{ textAlign: "left", color: "var(--muted)", fontSize: 12 }}>
+                  <th style={{ padding: "6px 10px", fontWeight: 600, borderBottom: "1px solid var(--border)" }}>Send</th>
+                  <th style={{ padding: "6px 10px", fontWeight: 600, borderBottom: "1px solid var(--border)" }}>Entity</th>
+                  <th style={{ padding: "6px 10px", fontWeight: 600, borderBottom: "1px solid var(--border)", textAlign: "right" }}>Articles in digest</th>
+                </tr>
+              </thead>
+              <tbody>
+                {runLog.flatMap((run) => {
+                  const sendLabel = formatNzDateTime(run.runAt);
+                  const rowCount = run.entities.length;
+                  return run.entities.map((ent, idx) => (
+                    <tr key={`${run.runId}-${ent.entityName}`} style={idx === 0 ? { borderTop: "2px solid var(--border)" } : undefined}>
+                      {idx === 0 ? (
+                        <td
+                          rowSpan={rowCount}
+                          style={{ padding: "8px 10px", verticalAlign: "top", whiteSpace: "nowrap", borderBottom: "1px solid var(--border)" }}
+                        >
+                          <div style={{ fontWeight: 600 }}>{sendLabel}</div>
+                          <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 2 }}>
+                            {run.mode === "admin" ? "Admin digest" : "Entity digests"} · {run.totalArticles} total
+                          </div>
+                        </td>
+                      ) : null}
+                      <td style={{ padding: "6px 10px", borderBottom: "1px solid #f1f1f4" }}>{ent.entityName}</td>
+                      <td style={{ padding: "6px 10px", borderBottom: "1px solid #f1f1f4", textAlign: "right", fontVariantNumeric: "tabular-nums" }}>
+                        {ent.articleCount}
+                      </td>
+                    </tr>
+                  ));
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </section>
+
+      {/* ============================================================ */}
+      {/*  DEDUPE LEDGER                                                */}
+      {/* ============================================================ */}
+
+      <section style={panelStyle}>
+        <h2 style={{ fontSize: "1rem", margin: "0 0 0.5rem 0" }}>Dedupe Ledger</h2>
+        <p style={{ fontSize: 13, color: "var(--muted)", margin: "0 0 12px", maxWidth: "44rem", lineHeight: 1.5 }}>
+          Articles already emailed in a digest are skipped on subsequent runs (within the dedupe
+          window) so recipients don&apos;t get duplicates. If a digest failed or sent incorrect
+          content, clear the last run (or the whole ledger) to make those articles eligible again,
+          then re-run the digest.
+        </p>
+
+        {!dedupeStats && !dedupeLoading && (
+          <p style={{ margin: 0, color: "var(--muted)", fontSize: 13 }}>
+            Click &ldquo;Load config&rdquo; above to view the dedupe ledger.
+          </p>
+        )}
+        {dedupeLoading && <p style={{ margin: 0, color: "var(--muted)" }}><Spinner /> Loading…</p>}
+        {dedupeError && <p style={{ color: "#b91c1c", fontSize: 13, margin: "0 0 8px" }}>{dedupeError}</p>}
+
+        {dedupeStats && (
+          <>
+            <dl style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(8rem, 1fr))", gap: "0.75rem", margin: "0 0 14px", fontSize: 14 }}>
+              <div>
+                <dt style={{ fontSize: 12, color: "var(--muted)", margin: 0 }}>Active (within {dedupeStats.windowDays}d)</dt>
+                <dd style={{ margin: "4px 0 0", fontWeight: 600 }}>{dedupeStats.activeWithinWindow}</dd>
+              </div>
+              <div>
+                <dt style={{ fontSize: 12, color: "var(--muted)", margin: 0 }}>Total stored</dt>
+                <dd style={{ margin: "4px 0 0" }}>{dedupeStats.total}</dd>
+              </div>
+              <div>
+                <dt style={{ fontSize: 12, color: "var(--muted)", margin: 0 }}>Last run URLs</dt>
+                <dd style={{ margin: "4px 0 0" }}>{dedupeStats.lastRunCount}</dd>
+              </div>
+              <div>
+                <dt style={{ fontSize: 12, color: "var(--muted)", margin: 0 }}>Last sent</dt>
+                <dd style={{ margin: "4px 0 0", fontSize: 12 }}>
+                  {formatNzDateTime(dedupeStats.lastSentAt)}
+                </dd>
+              </div>
+            </dl>
+
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center" }}>
+              <button
+                type="button"
+                onClick={() => clearDedupe("last")}
+                disabled={dedupeBusy !== null || dedupeStats.lastRunCount === 0}
+                style={{
+                  ...btnSecondary,
+                  opacity: dedupeBusy === null && dedupeStats.lastRunCount > 0 ? 1 : 0.5,
+                  cursor: dedupeBusy === null && dedupeStats.lastRunCount > 0 ? "pointer" : "not-allowed",
+                }}
+              >
+                {dedupeBusy === "last" && <Spinner size={14} />}
+                Clear last digest run
+              </button>
+              <button
+                type="button"
+                onClick={() => clearDedupe("all")}
+                disabled={dedupeBusy !== null || dedupeStats.total === 0}
+                style={{
+                  ...btnDanger,
+                  padding: "6px 12px",
+                  fontSize: 13,
+                  opacity: dedupeBusy === null && dedupeStats.total > 0 ? 1 : 0.5,
+                  cursor: dedupeBusy === null && dedupeStats.total > 0 ? "pointer" : "not-allowed",
+                }}
+              >
+                {dedupeBusy === "all" && <Spinner size={14} />}
+                Clear entire ledger
+              </button>
+              <button type="button" onClick={() => loadDedupeStats()} style={btnSecondary}>
+                Refresh
+              </button>
+            </div>
+            {dedupeMsg && <p style={{ color: "#047857", fontSize: 13, margin: "8px 0 0" }}>{dedupeMsg}</p>}
+          </>
         )}
       </section>
     </main>

@@ -73,9 +73,26 @@ export async function ensureTablesExist(): Promise<void> {
   `);
   await query(`
     CREATE TABLE IF NOT EXISTS digest_sent_urls (
-      url_norm     text PRIMARY KEY,
-      first_sent_at timestamptz NOT NULL DEFAULT now()
+      url_norm      text PRIMARY KEY,
+      first_sent_at timestamptz NOT NULL DEFAULT now(),
+      digest_run_id text
     )
   `);
+  // Backfill the run-id column for databases created before it existed.
+  await query(`ALTER TABLE digest_sent_urls ADD COLUMN IF NOT EXISTS digest_run_id text`);
+  await query(`CREATE INDEX IF NOT EXISTS idx_digest_sent_urls_first_sent_at ON digest_sent_urls(first_sent_at)`);
+  await query(`CREATE INDEX IF NOT EXISTS idx_digest_sent_urls_run_id ON digest_sent_urls(digest_run_id)`);
+  await query(`
+    CREATE TABLE IF NOT EXISTS digest_run_log (
+      id            serial PRIMARY KEY,
+      run_id        text NOT NULL,
+      run_at        timestamptz NOT NULL DEFAULT now(),
+      mode          text NOT NULL,
+      entity_name   text NOT NULL,
+      article_count integer NOT NULL
+    )
+  `);
+  await query(`CREATE INDEX IF NOT EXISTS idx_digest_run_log_run_id ON digest_run_log(run_id)`);
+  await query(`CREATE INDEX IF NOT EXISTS idx_digest_run_log_run_at ON digest_run_log(run_at)`);
   _tablesEnsured = true;
 }

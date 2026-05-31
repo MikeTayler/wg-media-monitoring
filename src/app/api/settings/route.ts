@@ -9,6 +9,7 @@ const ALLOWED_KEYS = new Set([
   "cron_ingest_time",
   "cron_digest_time",
   "cron_timezone",
+  "relevance_threshold",
 ]);
 
 /** All settings as a key-value object. */
@@ -53,6 +54,16 @@ export async function PUT(request: Request) {
       { ok: false, error: `Key not allowed. Valid keys: ${Array.from(ALLOWED_KEYS).join(", ")}` },
       { status: 400 }
     );
+  }
+
+  if (key === "relevance_threshold") {
+    const n = Number(value);
+    if (!Number.isInteger(n) || n < 0 || n > 100) {
+      return NextResponse.json(
+        { ok: false, error: "relevance_threshold must be an integer between 0 and 100" },
+        { status: 400 }
+      );
+    }
   }
 
   const sql = getDb();

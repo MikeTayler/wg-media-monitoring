@@ -152,7 +152,8 @@ export type ScoreAndSummaryResult = {
  * If score < RELEVANCE_DISCARD_BELOW, summary will be empty string.
  */
 export async function scoreAndSummariseArticle(
-  input: ScoreArticleInput
+  input: ScoreArticleInput,
+  discardBelow: number = RELEVANCE_DISCARD_BELOW
 ): Promise<ScoreAndSummaryResult> {
   if (!hasGatewayApiKey()) {
     console.error(
@@ -192,11 +193,11 @@ Body / summary text:
 ${body}
 
 Respond with a single JSON object exactly in this shape:
-{"score": <number 0-100>, "reason": "<one sentence explaining the score>", "summary": "<1-2 sentence factual summary for colleagues, or empty string if score is below 40>"}
+{"score": <number 0-100>, "reason": "<one sentence explaining the score>", "summary": "<1-2 sentence factual summary for colleagues, or empty string if score is below ${discardBelow}>"}
 
 Rules:
 - Score 0-100 for how relevant this article is to the entity
-- If score < 40, set summary to ""
+- If score < ${discardBelow}, set summary to ""
 - Summary should be factual and neutral — no editorial opinion or hype
 - If the article is paywalled, base the summary only on the title and RSS description provided`;
 
@@ -210,7 +211,7 @@ Rules:
     return {
       score: clampScore(parsed.score),
       reason: parsed.reason,
-      summary: parsed.score >= RELEVANCE_DISCARD_BELOW ? parsed.summary : "",
+      summary: parsed.score >= discardBelow ? parsed.summary : "",
     };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);

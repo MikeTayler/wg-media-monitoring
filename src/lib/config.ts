@@ -8,7 +8,27 @@
  */
 
 import { query } from "@/lib/db";
+import { RELEVANCE_DISCARD_BELOW } from "@/lib/engine/ai-gateway-client";
 import type { Entity } from "@/lib/types";
+
+/**
+ * Minimum AI relevance score (0–100) an article must reach to be included in a
+ * digest. Configurable from the dashboard via the `relevance_threshold` setting;
+ * falls back to the built-in default when unset or invalid.
+ */
+export async function getRelevanceThreshold(): Promise<number> {
+  try {
+    const rows = await query<{ value: string }>(
+      "SELECT value FROM settings WHERE key = 'relevance_threshold'"
+    );
+    const raw = rows[0]?.value;
+    const n = raw != null ? Number(raw) : NaN;
+    if (Number.isFinite(n)) return Math.min(100, Math.max(0, Math.round(n)));
+  } catch (err) {
+    console.error("[config] Failed to read relevance_threshold:", err);
+  }
+  return RELEVANCE_DISCARD_BELOW;
+}
 
 /**
  * Load entities with their keywords and enabled recipients from the database.

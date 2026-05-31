@@ -83,6 +83,7 @@ const DEFAULT_SETTINGS: Array<{ key: string; value: string }> = [
   { key: "cron_ingest_time", value: "05:45" },
   { key: "cron_digest_time", value: "06:30" },
   { key: "cron_timezone", value: "Pacific/Auckland" },
+  { key: "relevance_threshold", value: "40" },
 ];
 
 async function main() {
