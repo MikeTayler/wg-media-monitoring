@@ -27,6 +27,15 @@ export type RelevanceScoreResult = {
   reason: string;
 };
 
+/** Tone of the coverage toward the entity. */
+export type Sentiment = "positive" | "neutral" | "negative";
+
+function normaliseSentiment(value: unknown): Sentiment {
+  const v = typeof value === "string" ? value.trim().toLowerCase() : "";
+  if (v === "positive" || v === "negative") return v;
+  return "neutral";
+}
+
 /**
  * Relevance scoring via Vercel AI Gateway (Claude Haiku).
  * Call only after keyword pre-filter — do not send the full ingest set here.
@@ -119,6 +128,7 @@ function parseScoreAndSummaryJson(content: string): {
   score: number;
   reason: string;
   summary: string;
+  sentiment: Sentiment;
 } {
   const trimmed = content.trim();
   const jsonMatch = trimmed.match(/\{[\s\S]*\}/);
@@ -129,6 +139,7 @@ function parseScoreAndSummaryJson(content: string): {
     score?: unknown;
     reason?: unknown;
     summary?: unknown;
+    sentiment?: unknown;
   };
   const score = typeof parsed.score === "number" ? parsed.score : Number(parsed.score);
   const reason =
@@ -137,13 +148,14 @@ function parseScoreAndSummaryJson(content: string): {
   if (!Number.isFinite(score) || reason.length === 0) {
     throw new Error("Invalid score+summary JSON shape");
   }
-  return { score, reason, summary };
+  return { score, reason, summary, sentiment: normaliseSentiment(parsed.sentiment) };
 }
 
 export type ScoreAndSummaryResult = {
   score: number;
   reason: string;
   summary: string;
+  sentiment: Sentiment;
 };
 
 /**
@@ -163,6 +175,7 @@ export async function scoreAndSummariseArticle(
       score: DEFAULT_RELEVANCE_SCORE,
       reason: "Relevance scoring unavailable (API key missing).",
       summary: "",
+      sentiment: "neutral",
     };
   }
 
@@ -193,12 +206,13 @@ Body / summary text:
 ${body}
 
 Respond with a single JSON object exactly in this shape:
-{"score": <number 0-100>, "reason": "<one sentence explaining the score>", "summary": "<1-2 sentence factual summary for colleagues, or empty string if score is below ${discardBelow}>"}
+{"score": <number 0-100>, "reason": "<one sentence explaining the score>", "summary": "<1-2 sentence factual summary for colleagues, or empty string if score is below ${discardBelow}>", "sentiment": "<positive|neutral|negative>"}
 
 Rules:
 - Score 0-100 for how relevant this article is to the entity
 - If score < ${discardBelow}, set summary to ""
 - Summary should be factual and neutral — no editorial opinion or hype
+- sentiment = the tone of the coverage toward this entity (not the news in general): "negative" if it is critical, damaging, or reputationally risky for the entity; "positive" if favourable; "neutral" if balanced or merely mentions them
 - If the article is paywalled, base the summary only on the title and RSS description provided`;
 
   try {
@@ -212,6 +226,7 @@ Rules:
       score: clampScore(parsed.score),
       reason: parsed.reason,
       summary: parsed.score >= discardBelow ? parsed.summary : "",
+      sentiment: parsed.sentiment,
     };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
@@ -220,6 +235,7 @@ Rules:
       score: DEFAULT_RELEVANCE_SCORE,
       reason: "Relevance could not be scored automatically; default score applied.",
       summary: "",
+      sentiment: "neutral",
     };
   }
 }

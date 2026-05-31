@@ -6,6 +6,9 @@
 
 export type RelevanceBand = "High" | "Medium";
 
+/** Tone of the coverage toward the entity. */
+export type Sentiment = "positive" | "neutral" | "negative";
+
 export type DigestArticleRow = {
   title: string;
   url: string;
@@ -16,11 +19,30 @@ export type DigestArticleRow = {
   relevanceBand: RelevanceBand;
   relevanceScore: number;
   summary: string;
+  matchedKeywords: string[];
+  /** One-sentence explanation of the relevance score. */
+  relevanceReason: string;
+  sentiment: Sentiment;
+};
+
+/** Article that matched keywords but scored below the relevance threshold. */
+export type ExcludedArticleRow = {
+  title: string;
+  url: string;
+  sourceLabel: string;
+  publishedLabel: string;
+  paywalled: boolean;
+  relevanceScore: number;
+  relevanceReason: string;
+  matchedKeywords: string[];
+  sentiment: Sentiment;
 };
 
 export type DigestSection = {
   entityName: string;
   articles: DigestArticleRow[];
+  /** Optional: keyword matches that fell below the relevance threshold. */
+  excludedArticles?: ExcludedArticleRow[];
 };
 
 function escapeHtml(text: string): string {
@@ -46,6 +68,27 @@ function formatSummaryHtml(summary: string): string {
 /** Map numeric score to High (≥70) or Medium (40–69). */
 export function scoreToRelevanceBand(score: number): RelevanceBand {
   return score >= 70 ? "High" : "Medium";
+}
+
+/** Coloured pill for the coverage sentiment. Neutral renders nothing. */
+function renderSentimentBadge(sentiment: Sentiment): string {
+  if (sentiment === "neutral") return "";
+  const label = sentiment === "positive" ? "Positive" : "Negative";
+  const color = sentiment === "positive" ? "#166534" : "#991b1b";
+  const bg = sentiment === "positive" ? "#dcfce7" : "#fee2e2";
+  return `<span style="display:inline-block;margin-left:6px;padding:2px 8px;font-size:12px;font-weight:600;color:${color};background-color:${bg};border-radius:999px;">${label}</span>`;
+}
+
+/** Render the AI relevance reason as a small italic line. */
+function renderReasonHtml(reason: string): string {
+  if (!reason) return "";
+  return [
+    "<tr>",
+    '<td style="padding-top:6px;font-size:13px;line-height:1.45;color:#6b7280;font-style:italic;">',
+    `Why it matters: ${escapeHtml(reason)}`,
+    "</td>",
+    "</tr>",
+  ].join("");
 }
 
 /** No qualifying articles for this recipient. */
@@ -104,6 +147,9 @@ function renderArticleRow(row: DigestArticleRow): string {
     : "";
   const bandColor = row.relevanceBand === "High" ? "#166534" : "#854d0e";
   const bandBg = row.relevanceBand === "High" ? "#dcfce7" : "#fef9c3";
+  const kwText = row.matchedKeywords.length > 0
+    ? `Matched: ${row.matchedKeywords.map(escapeHtml).join(", ")}`
+    : "";
 
   return [
     '<table role="presentation" cellpadding="0" cellspacing="0" width="100%" style="margin-bottom:20px;border-bottom:1px solid #f3f4f6;padding-bottom:20px;">',
@@ -117,6 +163,7 @@ function renderArticleRow(row: DigestArticleRow): string {
     `<span style="font-size:13px;color:#6b7280;">${escapeHtml(row.sourceLabel)} · ${escapeHtml(row.publishedLabel)}</span>`,
     badge,
     `<span style="display:inline-block;margin-left:8px;padding:2px 8px;font-size:12px;font-weight:600;color:${bandColor};background-color:${bandBg};border-radius:999px;">${row.relevanceBand}</span>`,
+    renderSentimentBadge(row.sentiment),
     `<span style="font-size:12px;color:#9ca3af;margin-left:6px;">(${row.relevanceScore})</span>`,
     "</td>",
     "</tr>",
@@ -125,6 +172,16 @@ function renderArticleRow(row: DigestArticleRow): string {
     formatSummaryHtml(row.summary),
     "</td>",
     "</tr>",
+    renderReasonHtml(row.relevanceReason),
+    kwText
+      ? [
+          "<tr>",
+          '<td style="padding-top:6px;font-size:12px;color:#9ca3af;line-height:1.4;">',
+          kwText,
+          "</td>",
+          "</tr>",
+        ].join("")
+      : "",
     "</table>",
   ].join("");
 }
@@ -135,6 +192,64 @@ function renderSection(section: DigestSection, rowsHtml: string): string {
     escapeHtml(section.entityName),
     "</h2>",
     rowsHtml,
+  ].join("");
+}
+
+/** Compact row for a keyword match that didn't reach the relevance threshold. */
+function renderExcludedArticleRow(row: ExcludedArticleRow): string {
+  const badge = row.paywalled
+    ? '<span style="display:inline-block;margin-left:6px;padding:1px 5px;font-size:10px;font-weight:600;color:#92400e;background-color:#fef3c7;border-radius:4px;vertical-align:middle;">Paywalled</span>'
+    : "";
+  const kwText = row.matchedKeywords.length > 0
+    ? `Matched: ${row.matchedKeywords.map(escapeHtml).join(", ")}`
+    : "";
+
+  return [
+    '<table role="presentation" cellpadding="0" cellspacing="0" width="100%" style="margin-bottom:14px;">',
+    "<tr>",
+    "<td>",
+    `<a href="${escapeAttr(row.url)}" style="color:#4b5563;font-size:14px;font-weight:600;line-height:1.35;text-decoration:none;">${escapeHtml(row.title)}</a>`,
+    badge,
+    renderSentimentBadge(row.sentiment),
+    "</td>",
+    "</tr>",
+    "<tr>",
+    '<td style="padding-top:4px;">',
+    `<span style="font-size:12px;color:#9ca3af;">${escapeHtml(row.sourceLabel)} · ${escapeHtml(row.publishedLabel)} · Score: ${row.relevanceScore}</span>`,
+    "</td>",
+    "</tr>",
+    row.relevanceReason
+      ? [
+          "<tr>",
+          '<td style="padding-top:4px;font-size:13px;line-height:1.45;color:#6b7280;">',
+          escapeHtml(row.relevanceReason),
+          "</td>",
+          "</tr>",
+        ].join("")
+      : "",
+    kwText
+      ? [
+          "<tr>",
+          '<td style="padding-top:4px;font-size:12px;color:#9ca3af;line-height:1.4;">',
+          kwText,
+          "</td>",
+          "</tr>",
+        ].join("")
+      : "",
+    "</table>",
+  ].join("");
+}
+
+/** Grey "Other keyword matches" block listing below-threshold articles. */
+function renderExcludedBlock(rows: ExcludedArticleRow[]): string {
+  if (rows.length === 0) return "";
+  const sorted = [...rows].sort((a, b) => b.relevanceScore - a.relevanceScore);
+  return [
+    '<div style="margin:4px 0 24px 0;padding:14px 16px;background-color:#f9fafb;border:1px solid #f3f4f6;border-radius:6px;">',
+    '<p style="margin:0 0 4px 0;font-size:13px;font-weight:600;color:#6b7280;">Other keyword matches</p>',
+    '<p style="margin:0 0 12px 0;font-size:12px;color:#9ca3af;line-height:1.4;">These articles matched the keywords but scored below the relevance threshold, so they were not included above.</p>',
+    sorted.map(renderExcludedArticleRow).join(""),
+    "</div>",
   ].join("");
 }
 
@@ -149,6 +264,8 @@ export type AdminDigestArticleRow = DigestArticleRow & {
 export type AdminDigestSection = {
   entityName: string;
   articles: AdminDigestArticleRow[];
+  /** Optional: keyword matches that fell below the relevance threshold. */
+  excludedArticles?: ExcludedArticleRow[];
 };
 
 function renderAdminArticleRow(row: AdminDigestArticleRow): string {
@@ -173,6 +290,7 @@ function renderAdminArticleRow(row: AdminDigestArticleRow): string {
     `<span style="font-size:13px;color:#6b7280;">${escapeHtml(row.sourceLabel)} · ${escapeHtml(row.publishedLabel)}</span>`,
     badge,
     `<span style="display:inline-block;margin-left:8px;padding:2px 8px;font-size:12px;font-weight:600;color:${bandColor};background-color:${bandBg};border-radius:999px;">${row.relevanceBand}</span>`,
+    renderSentimentBadge(row.sentiment),
     `<span style="font-size:12px;color:#9ca3af;margin-left:6px;">Score: ${row.relevanceScore}</span>`,
     "</td>",
     "</tr>",
@@ -181,6 +299,7 @@ function renderAdminArticleRow(row: AdminDigestArticleRow): string {
     formatSummaryHtml(row.summary),
     "</td>",
     "</tr>",
+    renderReasonHtml(row.relevanceReason),
     kwText
       ? [
           "<tr>",
@@ -195,16 +314,19 @@ function renderAdminArticleRow(row: AdminDigestArticleRow): string {
 }
 
 export function renderAdminDigestHtml(sections: AdminDigestSection[]): string {
-  const hasArticles = sections.some((s) => s.articles.length > 0);
-  if (!hasArticles) {
+  const hasContent = sections.some(
+    (s) => s.articles.length > 0 || (s.excludedArticles?.length ?? 0) > 0
+  );
+  if (!hasContent) {
     return renderEmptyDigestHtml();
   }
 
   const parts: string[] = [];
   for (const section of sections) {
-    if (section.articles.length === 0) continue;
+    const excluded = section.excludedArticles ?? [];
+    if (section.articles.length === 0 && excluded.length === 0) continue;
     const rows = section.articles.map(renderAdminArticleRow).join("");
-    parts.push(renderSection(section, rows));
+    parts.push(renderSection(section, rows + renderExcludedBlock(excluded)));
   }
 
   return wrapLayout({
@@ -217,16 +339,19 @@ export function renderAdminDigestHtml(sections: AdminDigestSection[]): string {
  * Render grouped digest sections. Pass empty sections to get the empty-day message.
  */
 export function renderDigestHtml(sections: DigestSection[]): string {
-  const hasArticles = sections.some((s) => s.articles.length > 0);
-  if (!hasArticles) {
+  const hasContent = sections.some(
+    (s) => s.articles.length > 0 || (s.excludedArticles?.length ?? 0) > 0
+  );
+  if (!hasContent) {
     return renderEmptyDigestHtml();
   }
 
   const parts: string[] = [];
   for (const section of sections) {
-    if (section.articles.length === 0) continue;
+    const excluded = section.excludedArticles ?? [];
+    if (section.articles.length === 0 && excluded.length === 0) continue;
     const rows = section.articles.map(renderArticleRow).join("");
-    parts.push(renderSection(section, rows));
+    parts.push(renderSection(section, rows + renderExcludedBlock(excluded)));
   }
 
   return wrapLayout({

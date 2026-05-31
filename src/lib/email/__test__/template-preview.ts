@@ -27,6 +27,9 @@ const sections: DigestSection[] = [
         relevanceScore: 88,
         summary:
           "Community health leaders said the funding would support early intervention programmes across Auckland and Wellington. The article notes ongoing workforce shortages in Pacific mental health services.",
+        matchedKeywords: ["Le Va", "suicide prevention", "Pacific"],
+        relevanceReason: "Directly names Le Va and its suicide-prevention work.",
+        sentiment: "positive",
       },
       {
         title:
@@ -39,6 +42,9 @@ const sections: DigestSection[] = [
         relevanceScore: 62,
         summary:
           "Organisers described strong turnout at a two-day forum focused on culturally led care. Ministers were invited but did not speak on the record.",
+        matchedKeywords: ["Pasifika", "youth mental health"],
+        relevanceReason: "Covers Pasifika youth mental health themes relevant to Le Va.",
+        sentiment: "neutral",
       },
     ],
   },
@@ -56,6 +62,9 @@ const sections: DigestSection[] = [
         relevanceScore: 76,
         summary:
           "Advocates argued that national contracts should recognise travel time and coordination across rural networks. The Ministry of Health said a review is scheduled for later in the year.",
+        matchedKeywords: ["Pathways", "disability support"],
+        relevanceReason: "Discusses disability support contracts central to Pathways' work.",
+        sentiment: "negative",
       },
     ],
   },
@@ -73,6 +82,9 @@ const sections: DigestSection[] = [
         relevanceScore: 55,
         summary:
           "The Minister told reporters that officials are analysing submissions on compulsory treatment criteria. Full article text is not available outside the paywall; this summary is based on the RSS headline and description only.",
+        matchedKeywords: ["Mental Health Act", "Wise Group"],
+        relevanceReason: "Sector-wide Mental Health Act review affects Wise Group entities.",
+        sentiment: "neutral",
       },
       {
         title:
@@ -85,6 +97,9 @@ const sections: DigestSection[] = [
         relevanceScore: 82,
         summary:
           "The pilot will combine housing navigation with peer support in three regions. Funding is drawn from the existing social services budget.",
+        matchedKeywords: ["Wise Group", "housing support"],
+        relevanceReason: "Announces a Wise Group subsidiary housing pilot.",
+        sentiment: "positive",
       },
     ],
   },
@@ -102,6 +117,9 @@ const sections: DigestSection[] = [
         relevanceScore: 68,
         summary:
           "Training providers said demand from schools and NGOs has doubled year on year. The story notes Te Pou’s role in accrediting course materials.",
+        matchedKeywords: ["Te Pou", "Mental Health First Aid"],
+        relevanceReason: "Notes Te Pou's role accrediting Mental Health First Aid courses.",
+        sentiment: "neutral",
       },
     ],
   },

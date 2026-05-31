@@ -7,6 +7,7 @@ import {
 import {
   RELEVANCE_DISCARD_BELOW,
   scoreAndSummariseArticle,
+  type Sentiment,
 } from "@/lib/engine/ai-scorer";
 import { matchArticleToEntities } from "@/lib/engine/keywords";
 import {
@@ -20,6 +21,7 @@ import type {
   DigestSection,
   AdminDigestSection,
   AdminDigestArticleRow,
+  ExcludedArticleRow,
 } from "@/lib/email/template";
 import { sendDigestEmail } from "@/lib/email/sender";
 import {
@@ -44,6 +46,7 @@ export type ScoredDigestEntry = {
   relevanceReason: string;
   summary: string;
   matchedKeywords: string[];
+  sentiment: Sentiment;
 };
 
 const SOURCE_LABELS: Record<Article["source"], string> = {
@@ -96,6 +99,33 @@ function countEntriesByEntity(entries: ScoredDigestEntry[]): DigestRunEntityCoun
   return Array.from(m, ([entityName, articleCount]) => ({ entityName, articleCount }));
 }
 
+/** Group scored entries by entityId. */
+function groupByEntityId(entries: ScoredDigestEntry[]): Map<string, ScoredDigestEntry[]> {
+  const byEntity = new Map<string, ScoredDigestEntry[]>();
+  for (const e of entries) {
+    if (!byEntity.has(e.entityId)) byEntity.set(e.entityId, []);
+    byEntity.get(e.entityId)!.push(e);
+  }
+  return byEntity;
+}
+
+/** Map a below-threshold entry to its compact email row, sorted by score desc. */
+function toExcludedRows(entries: ScoredDigestEntry[]): ExcludedArticleRow[] {
+  return [...entries]
+    .sort((a, b) => b.relevanceScore - a.relevanceScore)
+    .map((row) => ({
+      title: row.article.title,
+      url: row.article.url,
+      sourceLabel: SOURCE_LABELS[row.article.source],
+      publishedLabel: formatDigestPublishedDate(row.article.publishedAt),
+      paywalled: row.article.paywalled,
+      relevanceScore: row.relevanceScore,
+      relevanceReason: row.relevanceReason,
+      matchedKeywords: row.matchedKeywords,
+      sentiment: row.sentiment,
+    }));
+}
+
 export function recipientSubscribedToEntity(
   email: string,
   entityId: string,
@@ -118,18 +148,17 @@ export function filterEntriesForRecipient(
 /** Build entity-filtered digest sections (for entity recipients via cron). */
 export function buildSectionsForRecipient(
   entries: ScoredDigestEntry[],
-  entities: Entity[]
+  entities: Entity[],
+  excludedEntries: ScoredDigestEntry[] = []
 ): DigestSection[] {
-  const byEntity = new Map<string, ScoredDigestEntry[]>();
-  for (const e of entries) {
-    if (!byEntity.has(e.entityId)) byEntity.set(e.entityId, []);
-    byEntity.get(e.entityId)!.push(e);
-  }
+  const byEntity = groupByEntityId(entries);
+  const excludedByEntity = groupByEntityId(excludedEntries);
 
   const sections: DigestSection[] = [];
   for (const ent of entities) {
-    const list = byEntity.get(ent.id);
-    if (!list || list.length === 0) continue;
+    const list = byEntity.get(ent.id) ?? [];
+    const excludedList = excludedByEntity.get(ent.id) ?? [];
+    if (list.length === 0 && excludedList.length === 0) continue;
 
     list.sort((a, b) => b.relevanceScore - a.relevanceScore);
 
@@ -142,9 +171,12 @@ export function buildSectionsForRecipient(
       relevanceBand: scoreToRelevanceBand(row.relevanceScore),
       relevanceScore: row.relevanceScore,
       summary: row.summary.trim() || "—",
+      matchedKeywords: row.matchedKeywords,
+      relevanceReason: row.relevanceReason,
+      sentiment: row.sentiment,
     }));
 
-    sections.push({ entityName: ent.name, articles });
+    sections.push({ entityName: ent.name, articles, excludedArticles: toExcludedRows(excludedList) });
   }
 
   return sections;
@@ -153,18 +185,17 @@ export function buildSectionsForRecipient(
 /** Build aggregated admin digest sections with matched keywords (all entities, all entries). */
 export function buildAdminSections(
   entries: ScoredDigestEntry[],
-  entities: Entity[]
+  entities: Entity[],
+  excludedEntries: ScoredDigestEntry[] = []
 ): AdminDigestSection[] {
-  const byEntity = new Map<string, ScoredDigestEntry[]>();
-  for (const e of entries) {
-    if (!byEntity.has(e.entityId)) byEntity.set(e.entityId, []);
-    byEntity.get(e.entityId)!.push(e);
-  }
+  const byEntity = groupByEntityId(entries);
+  const excludedByEntity = groupByEntityId(excludedEntries);
 
   const sections: AdminDigestSection[] = [];
   for (const ent of entities) {
-    const list = byEntity.get(ent.id);
-    if (!list || list.length === 0) continue;
+    const list = byEntity.get(ent.id) ?? [];
+    const excludedList = excludedByEntity.get(ent.id) ?? [];
+    if (list.length === 0 && excludedList.length === 0) continue;
 
     list.sort((a, b) => b.relevanceScore - a.relevanceScore);
 
@@ -178,9 +209,11 @@ export function buildAdminSections(
       relevanceScore: row.relevanceScore,
       summary: row.summary.trim() || "—",
       matchedKeywords: row.matchedKeywords,
+      relevanceReason: row.relevanceReason,
+      sentiment: row.sentiment,
     }));
 
-    sections.push({ entityName: ent.name, articles });
+    sections.push({ entityName: ent.name, articles, excludedArticles: toExcludedRows(excludedList) });
   }
 
   return sections;
@@ -200,7 +233,7 @@ export async function buildScoredDigestEntries(
   articles: Article[],
   entities: Entity[],
   discardBelow: number = RELEVANCE_DISCARD_BELOW
-): Promise<{ entries: ScoredDigestEntry[]; keywordMatchPairs: number }> {
+): Promise<{ entries: ScoredDigestEntry[]; excluded: ScoredDigestEntry[]; keywordMatchPairs: number }> {
   // Step 1: Collect all keyword match pairs upfront
   const matchPairs: Array<{
     article: Article;
@@ -218,6 +251,7 @@ export async function buildScoredDigestEntries(
   const keywordMatchPairs = matchPairs.length;
   console.log(`[digest] Scoring ${matchPairs.length} keyword match pairs across ${entities.length} entities (concurrency: ${CONCURRENCY})`);
   const entries: ScoredDigestEntry[] = [];
+  const excluded: ScoredDigestEntry[] = [];
 
   // Step 2: Process in parallel batches
   for (let i = 0; i < matchPairs.length; i += CONCURRENCY) {
@@ -228,7 +262,7 @@ export async function buildScoredDigestEntries(
         const entity = entityById(entities, pair.entityId);
         if (!entity) return null;
 
-        const { score, reason, summary } = await scoreAndSummariseArticle(
+        const { score, reason, summary, sentiment } = await scoreAndSummariseArticle(
           {
             article: {
               title: pair.article.title,
@@ -242,9 +276,7 @@ export async function buildScoredDigestEntries(
           discardBelow
         );
 
-        if (score < discardBelow) return null;
-
-        return {
+        const entry: ScoredDigestEntry = {
           entityId: entity.id,
           entityName: entity.name,
           article: pair.article,
@@ -252,20 +284,27 @@ export async function buildScoredDigestEntries(
           relevanceReason: reason,
           summary,
           matchedKeywords: pair.matchedKeywords,
-        } satisfies ScoredDigestEntry;
+          sentiment,
+        };
+
+        return { entry, included: score >= discardBelow };
       })
     );
 
     for (const result of results) {
       if (result.status === "fulfilled" && result.value) {
-        entries.push(result.value);
+        if (result.value.included) {
+          entries.push(result.value.entry);
+        } else {
+          excluded.push(result.value.entry);
+        }
       } else if (result.status === "rejected") {
         console.error("[digest] Batch item failed:", result.reason);
       }
     }
   }
 
-  return { entries, keywordMatchPairs };
+  return { entries, excluded, keywordMatchPairs };
 }
 
 export type DigestRunStats = {
@@ -422,7 +461,7 @@ export async function runDigestPipeline(options: {
   const entities = await getEntities();
   const relevanceThreshold = await getRelevanceThreshold();
 
-  const { entries: scoredEntries, keywordMatchPairs } =
+  const { entries: scoredEntries, excluded: excludedEntries, keywordMatchPairs } =
     await buildScoredDigestEntries(articles, entities, relevanceThreshold);
 
   const digestEntriesAfterScoring = scoredEntries.length;
@@ -452,7 +491,7 @@ export async function runDigestPipeline(options: {
       };
     }
 
-    const adminSections = buildAdminSections(scoredEntries, entities);
+    const adminSections = buildAdminSections(scoredEntries, entities, excludedEntries);
     const adminHtml = renderAdminDigestHtml(adminSections);
 
     if (options.dryRun) {
@@ -539,7 +578,8 @@ export async function runDigestPipeline(options: {
   if (options.dryRun) {
     const previewRecipient = recipients[0];
     const filtered = filterEntriesForRecipient(previewRecipient, scoredEntries, entities);
-    const sections = buildSectionsForRecipient(filtered, entities);
+    const filteredExcluded = filterEntriesForRecipient(previewRecipient, excludedEntries, entities);
+    const sections = buildSectionsForRecipient(filtered, entities, filteredExcluded);
     const previewHtml = renderDigestHtml(sections);
 
     console.log(
@@ -563,7 +603,8 @@ export async function runDigestPipeline(options: {
   const normsToMark: string[] = [];
   for (const email of recipients) {
     const filtered = filterEntriesForRecipient(email, scoredEntries, entities);
-    const sections = buildSectionsForRecipient(filtered, entities);
+    const filteredExcluded = filterEntriesForRecipient(email, excludedEntries, entities);
+    const sections = buildSectionsForRecipient(filtered, entities, filteredExcluded);
     const html = renderDigestHtml(sections);
     const result = await sendDigestEmail({ to: email, subject, html });
     if (result.ok) {
