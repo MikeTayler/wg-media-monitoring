@@ -12,6 +12,32 @@ function buildHaystack(article: Article): string {
   return `${article.title}\n${article.body}`;
 }
 
+/**
+ * Normalise text before keyword comparison. Applied to BOTH the article text
+ * and each keyword so the two sides are compared on equal footing.
+ *
+ * Why this is needed (do not "simplify" this away):
+ *  - **Macron variants.** Te reo Māori names are often written without macrons
+ *    in source articles ("Kainga Ora" vs the keyword "Kāinga Ora"). Folding
+ *    macronned vowels to their plain equivalents (ā→a, ē→e, ī→i, ō→o, ū→u) lets
+ *    these match.
+ *  - **Unicode encoding mismatch.** A macronned vowel like "ā" can be stored as
+ *    a single precomposed code point (U+0101) OR as a plain "a" + combining
+ *    macron (U+0061 U+0304). These look identical but are different bytes, so a
+ *    raw match fails. NFC collapses these to one form; the NFD + combining-mark
+ *    strip then folds the diacritic away entirely.
+ *
+ * Steps: NFC (collapse encodings) → NFD + strip combining marks U+0300–U+036F
+ * (fold diacritics) → lowercase (case-insensitive matching).
+ */
+export function normaliseForMatching(text: string): string {
+  return text
+    .normalize("NFC")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase();
+}
+
 /** Escape characters that are significant in a regular expression. */
 function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -19,6 +45,10 @@ function escapeRegExp(value: string): string {
 
 /**
  * Build a case-insensitive, whole-word regex for a keyword/phrase.
+ *
+ * The keyword is run through {@link normaliseForMatching} first (the haystack is
+ * normalised the same way), so macron variants and Unicode encoding differences
+ * collapse before matching.
  *
  * - Multi-word phrases are matched with flexible whitespace between words
  *   (so "Te Pou" matches "Te  Pou" or a line break too).
@@ -30,7 +60,7 @@ function escapeRegExp(value: string): string {
  * Returns `null` for empty terms.
  */
 function buildKeywordPattern(term: string): RegExp | null {
-  const trimmed = term.trim();
+  const trimmed = normaliseForMatching(term).trim();
   if (trimmed.length === 0) return null;
   const core = trimmed.split(/\s+/).map(escapeRegExp).join("\\s+");
   return new RegExp(`(?<![\\p{L}\\p{N}])${core}(?![\\p{L}\\p{N}])`, "iu");
@@ -78,7 +108,9 @@ export function matchArticleToEntities(
   article: Article,
   entities: Entity[]
 ): EntityKeywordMatch[] {
-  const haystack = buildHaystack(article);
+  // Normalise the article text once; keyword patterns are normalised at build
+  // time, so both sides of the comparison use the same macron-folded form.
+  const haystack = normaliseForMatching(buildHaystack(article));
   const out: EntityKeywordMatch[] = [];
 
   for (const entity of entities) {
