@@ -26,6 +26,17 @@ function dedupeByUrl(articles: Article[]): Article[] {
 
 const FULL_TEXT_DELAY_MS = 300;
 
+/**
+ * Maximum number of articles to full-text enrich per run.
+ * Keeps the ingest function well within Vercel's 5-minute maxDuration even
+ * when there are many new articles (e.g. after adding new RSS feeds).
+ * Articles not enriched this run will be picked up on the next run.
+ */
+const MAX_ENRICH_PER_RUN = 80;
+
+/** Body length (chars) below which we consider an article un-enriched (RSS snippet only). */
+const RSS_SNIPPET_MAX_LEN = 800;
+
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -101,71 +112,18 @@ export async function ingestAll(options: IngestAllOptions = {}): Promise<IngestA
   const unique = dedupeByUrl(combined);
   emit({ type: "fetched", totalUnique: unique.length });
 
-  // Load URLs that already have a rich body in the DB so we can skip re-fetching
-  // their full text. With many feeds (220+ RNZ articles), re-enriching every
-  // article on every ingest run would blow the 5-minute Vercel function timeout.
-  const existingBodyRows = await query<{ url: string; body_len: number }>(
-    "SELECT url, length(body) AS body_len FROM articles"
-  );
-  const existingBodyMap = new Map<string, number>(
-    existingBodyRows.map((r) => [normalizeArticleUrl(r.url), r.body_len])
-  );
-
-  let fullTextEnriched = 0;
-  let fullTextFallback = 0;
-  let fullTextSkipped = 0;
-
-  // Only enrich articles that are genuinely new (no existing DB body longer than
-  // the RSS snippet). This keeps each run fast regardless of feed count.
-  const nonPaywalled = unique.filter((a) => !a.paywalled);
-  const toEnrich = nonPaywalled.filter((a) => {
-    const existingLen = existingBodyMap.get(normalizeArticleUrl(a.url)) ?? 0;
-    return existingLen <= a.body.length; // no richer body already stored
-  });
-  fullTextSkipped = nonPaywalled.length - toEnrich.length;
-
-  emit({ type: "enrich_start", total: toEnrich.length });
-
-  for (let i = 0; i < toEnrich.length; i++) {
-    const article = toEnrich[i];
-    emit({ type: "enrich_progress", current: i + 1, total: toEnrich.length });
-    try {
-      const text = await fetchFullText(article.url);
-      if (text && text.length > article.body.length) {
-        article.body = text;
-        fullTextEnriched++;
-      } else {
-        if (text) {
-          console.log(
-            `[ingest] Kept RSS body for ${article.url}: extracted ${text.length} chars <= existing ${article.body.length} chars`
-          );
-        }
-        fullTextFallback++;
-      }
-    } catch {
-      fullTextFallback++;
-    }
-    if (i < toEnrich.length - 1) {
-      await sleep(FULL_TEXT_DELAY_MS);
-    }
-  }
-
-  console.log(
-    `[ingest] Full-text enrichment: ${fullTextEnriched} enriched, ${fullTextFallback} kept RSS summary, ${fullTextSkipped} skipped (already in DB) — of ${nonPaywalled.length} non-paywalled`
-  );
-
   const updatedAt = new Date().toISOString();
   const batchId = updatedAt;
-  emit({ type: "writing", count: unique.length });
 
-  // Delete articles from previous batches, then upsert the current batch.
-  await query("DELETE FROM articles WHERE batch_id != $1", [batchId]);
+  // ── Phase 1: Write all RSS articles to DB immediately ─────────────────────
+  // Persisting before full-text enrichment means articles are available for the
+  // digest pipeline even if the enrichment phase times out on Vercel.
+  emit({ type: "writing", count: unique.length });
 
   for (const article of unique) {
     await query(
       // Keep the existing body when it is longer than what we're inserting —
-      // this preserves previously full-text-enriched bodies for articles we
-      // skipped re-enriching this run.
+      // this preserves previously full-text-enriched bodies.
       `INSERT INTO articles (id, source, url, title, body, published_at, ingested_at, paywalled, batch_id)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
        ON CONFLICT (url) DO UPDATE SET
@@ -191,6 +149,51 @@ export async function ingestAll(options: IngestAllOptions = {}): Promise<IngestA
   }
 
   console.log(`[ingest] Wrote ${unique.length} articles to database (batch ${batchId})`);
+
+  // Age-based cleanup: remove articles older than 3 days.
+  // Safer than "delete other batches" — no data loss if a prior run timed out.
+  await query(`DELETE FROM articles WHERE ingested_at < NOW() - INTERVAL '3 days'`);
+
+  // ── Phase 2: Full-text enrichment (capped to stay within 5-min timeout) ───
+  // Query the DB for non-paywalled articles that still only have an RSS snippet.
+  // Ordering by published_at DESC ensures we enrich the freshest articles first.
+  const needsEnrichRows = await query<{ id: string; url: string; body: string }>(
+    `SELECT id, url, body FROM articles
+     WHERE paywalled = false AND length(body) < $1
+     ORDER BY published_at DESC
+     LIMIT $2`,
+    [RSS_SNIPPET_MAX_LEN, MAX_ENRICH_PER_RUN]
+  );
+
+  let fullTextEnriched = 0;
+  let fullTextFallback = 0;
+  const nonPaywalledCount = unique.filter((a) => !a.paywalled).length;
+  const fullTextSkipped = Math.max(0, nonPaywalledCount - needsEnrichRows.length);
+
+  emit({ type: "enrich_start", total: needsEnrichRows.length });
+
+  for (let i = 0; i < needsEnrichRows.length; i++) {
+    const row = needsEnrichRows[i];
+    emit({ type: "enrich_progress", current: i + 1, total: needsEnrichRows.length });
+    try {
+      const text = await fetchFullText(row.url);
+      if (text && text.length > row.body.length) {
+        await query(`UPDATE articles SET body = $1 WHERE id = $2`, [text, row.id]);
+        fullTextEnriched++;
+      } else {
+        fullTextFallback++;
+      }
+    } catch {
+      fullTextFallback++;
+    }
+    if (i < needsEnrichRows.length - 1) {
+      await sleep(FULL_TEXT_DELAY_MS);
+    }
+  }
+
+  console.log(
+    `[ingest] Full-text enrichment: ${fullTextEnriched} enriched, ${fullTextFallback} kept RSS summary, ${fullTextSkipped} skipped (already rich) — of ${nonPaywalledCount} non-paywalled`
+  );
 
   return {
     ok: true,
