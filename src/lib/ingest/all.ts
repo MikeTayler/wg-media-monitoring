@@ -101,14 +101,34 @@ export async function ingestAll(options: IngestAllOptions = {}): Promise<IngestA
   const unique = dedupeByUrl(combined);
   emit({ type: "fetched", totalUnique: unique.length });
 
+  // Load URLs that already have a rich body in the DB so we can skip re-fetching
+  // their full text. With many feeds (220+ RNZ articles), re-enriching every
+  // article on every ingest run would blow the 5-minute Vercel function timeout.
+  const existingBodyRows = await query<{ url: string; body_len: number }>(
+    "SELECT url, length(body) AS body_len FROM articles"
+  );
+  const existingBodyMap = new Map<string, number>(
+    existingBodyRows.map((r) => [normalizeArticleUrl(r.url), r.body_len])
+  );
+
   let fullTextEnriched = 0;
   let fullTextFallback = 0;
-  const nonPaywalled = unique.filter((a) => !a.paywalled);
-  emit({ type: "enrich_start", total: nonPaywalled.length });
+  let fullTextSkipped = 0;
 
-  for (let i = 0; i < nonPaywalled.length; i++) {
-    const article = nonPaywalled[i];
-    emit({ type: "enrich_progress", current: i + 1, total: nonPaywalled.length });
+  // Only enrich articles that are genuinely new (no existing DB body longer than
+  // the RSS snippet). This keeps each run fast regardless of feed count.
+  const nonPaywalled = unique.filter((a) => !a.paywalled);
+  const toEnrich = nonPaywalled.filter((a) => {
+    const existingLen = existingBodyMap.get(normalizeArticleUrl(a.url)) ?? 0;
+    return existingLen <= a.body.length; // no richer body already stored
+  });
+  fullTextSkipped = nonPaywalled.length - toEnrich.length;
+
+  emit({ type: "enrich_start", total: toEnrich.length });
+
+  for (let i = 0; i < toEnrich.length; i++) {
+    const article = toEnrich[i];
+    emit({ type: "enrich_progress", current: i + 1, total: toEnrich.length });
     try {
       const text = await fetchFullText(article.url);
       if (text && text.length > article.body.length) {
@@ -125,13 +145,13 @@ export async function ingestAll(options: IngestAllOptions = {}): Promise<IngestA
     } catch {
       fullTextFallback++;
     }
-    if (i < nonPaywalled.length - 1) {
+    if (i < toEnrich.length - 1) {
       await sleep(FULL_TEXT_DELAY_MS);
     }
   }
 
   console.log(
-    `[ingest] Full-text enrichment: ${fullTextEnriched} enriched, ${fullTextFallback} kept RSS summary (of ${nonPaywalled.length} non-paywalled)`
+    `[ingest] Full-text enrichment: ${fullTextEnriched} enriched, ${fullTextFallback} kept RSS summary, ${fullTextSkipped} skipped (already in DB) — of ${nonPaywalled.length} non-paywalled`
   );
 
   const updatedAt = new Date().toISOString();
@@ -143,11 +163,15 @@ export async function ingestAll(options: IngestAllOptions = {}): Promise<IngestA
 
   for (const article of unique) {
     await query(
+      // Keep the existing body when it is longer than what we're inserting —
+      // this preserves previously full-text-enriched bodies for articles we
+      // skipped re-enriching this run.
       `INSERT INTO articles (id, source, url, title, body, published_at, ingested_at, paywalled, batch_id)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
        ON CONFLICT (url) DO UPDATE SET
          title        = EXCLUDED.title,
-         body         = EXCLUDED.body,
+         body         = CASE WHEN length(articles.body) > length(EXCLUDED.body)
+                             THEN articles.body ELSE EXCLUDED.body END,
          published_at = EXCLUDED.published_at,
          ingested_at  = EXCLUDED.ingested_at,
          paywalled    = EXCLUDED.paywalled,
